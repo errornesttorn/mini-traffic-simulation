@@ -98,10 +98,9 @@ const (
 )
 
 const (
-	accelEscapeLookaheadSecs  float32 = 2.0
+	accelEscapeLookaheadSecs  float32 = 1.0
 	accelEscapeTestShortSecs  float32 = 0.25
 	accelEscapeTestMediumSecs float32 = 0.5
-	accelEscapeTestLongSecs   float32 = 1.0
 )
 
 type Spline struct {
@@ -170,6 +169,7 @@ type Car struct {
 
 	CurrentSplineID     int
 	DestinationSplineID int
+	PrevSplineIDs       [2]int // last two splines before current; -1 = none
 	DistanceOnSpline    float32
 	Speed               float32
 	MaxSpeed            float32
@@ -735,15 +735,22 @@ func spawnCar(route Route) Car {
 		RouteID:             route.ID,
 		CurrentSplineID:     route.StartSplineID,
 		DestinationSplineID: route.EndSplineID,
+		PrevSplineIDs:       [2]int{-1, -1},
 		DistanceOnSpline:    0,
-		Speed:               randRange(0, 2),           // m/s — starts nearly stationary
-		MaxSpeed:            randRange(13.9, 36.1),     // m/s — 50–130 km/h
-		Accel:               randRange(2.5, 4.5),       // m/s²
+		Speed:               randRange(0, 2),                     // m/s — starts nearly stationary
+		MaxSpeed:            randRange(13.9, 36.1),               // m/s — 50–130 km/h
+		Accel:               randRange(2.5, 4.5),                 // m/s²
 		Length:              randRange(4.0, 4.8) / metersPerUnit, // world units
 		Width:               randRange(1.8, 2.0) / metersPerUnit, // world units
 		Color:               route.Color,
 		Braking:             false,
 	}
+}
+
+// recentlyLeft returns true if the car was on splineID within its last two transitions.
+// Used to suppress false blame when a car exits a priority lane onto a normal lane.
+func recentlyLeft(car Car, splineID int) bool {
+	return splineID >= 0 && (car.PrevSplineIDs[0] == splineID || car.PrevSplineIDs[1] == splineID)
 }
 
 func computeBrakingDecisions(cars []Car, splines []Spline, vehicleCounts map[int]int) ([]bool, []DebugBlameLink) {
@@ -772,6 +779,14 @@ func computeBrakingDecisions(cars []Car, splines []Spline, vehicleCounts map[int
 				continue
 			}
 			blameI, blameJ := determineBlame(collision, cars[i], cars[j])
+			// Suppress blame if the blamed car recently left the other car's current spline —
+			// it has already cleared that segment and the other car is following behind.
+			if blameI && recentlyLeft(cars[i], cars[j].CurrentSplineID) {
+				blameI = false
+			}
+			if blameJ && recentlyLeft(cars[j], cars[i].CurrentSplineID) {
+				blameJ = false
+			}
 			if blameI {
 				initialBlame[i] = true
 				tentativeLinks = append(tentativeLinks, DebugBlameLink{FromCarIndex: i, ToCarIndex: j})
@@ -821,7 +836,6 @@ func shouldBrakeForBlamedConflicts(carIndex int, cars []Car, splines []Spline, v
 	for _, seconds := range []float32{
 		accelEscapeTestShortSecs,
 		accelEscapeTestMediumSecs,
-		accelEscapeTestLongSecs,
 	} {
 		testCar := car
 		testCar.Speed = minf(targetSpeed, car.Speed+car.Accel*seconds)
@@ -844,6 +858,9 @@ func shouldBrakeForBlamedConflicts(carIndex int, cars []Car, splines []Spline, v
 func hasBlamedConflictWithPrediction(carIndex int, testCar Car, testPrediction []TrajectorySample, cars []Car, predictions [][]TrajectorySample) bool {
 	for otherIndex, otherCar := range cars {
 		if otherIndex == carIndex || otherIndex >= len(predictions) || len(predictions[otherIndex]) == 0 {
+			continue
+		}
+		if recentlyLeft(testCar, otherCar.CurrentSplineID) {
 			continue
 		}
 
@@ -1119,6 +1136,8 @@ func updateCars(cars []Car, routes []Route, splines []Spline, vehicleCounts map[
 			if !ok {
 				break
 			}
+			car.PrevSplineIDs[1] = car.PrevSplineIDs[0]
+			car.PrevSplineIDs[0] = car.CurrentSplineID
 			car.CurrentSplineID = nextSplineID
 		}
 	}

@@ -222,7 +222,7 @@
     },
     {
       "id": 23,
-      "priority": true,
+      "priority": false,
       "p0": {
         "X": -19.871334,
         "Y": -1.6844254
@@ -262,7 +262,7 @@
     },
     {
       "id": 25,
-      "priority": true,
+      "priority": false,
       "p0": {
         "X": 19.965843,
         "Y": 2.0737991
@@ -302,7 +302,7 @@
     },
     {
       "id": 27,
-      "priority": true,
+      "priority": false,
       "p0": {
         "X": 2.093399,
         "Y": -19.974451
@@ -342,7 +342,7 @@
     },
     {
       "id": 29,
-      "priority": true,
+      "priority": false,
       "p0": {
         "X": -1.9988899,
         "Y": 19.862728
@@ -561,180 +561,290 @@
   ],
   "cars": [
     {
-      "route_id": 16,
-      "current_spline_id": 23,
-      "destination_spline_id": 23,
-      "distance_on_spline": 3.0258756,
-      "speed": 10.630523,
-      "max_speed": 35.93064,
-      "accel": 3.9249468,
-      "length": 4.649565,
-      "width": 1.8390771
-    },
-    {
       "route_id": 17,
-      "current_spline_id": 11,
+      "current_spline_id": 28,
       "destination_spline_id": 29,
-      "distance_on_spline": 9.934619,
-      "speed": 8.263883,
-      "max_speed": 15.674618,
-      "accel": 3.3519707,
-      "length": 4.5575037,
-      "width": 1.907732
+      "distance_on_spline": 0,
+      "speed": 0,
+      "max_speed": 17.090923,
+      "accel": 4.275789,
+      "length": 4.6385694,
+      "width": 1.8021944
     },
     {
       "route_id": 16,
-      "current_spline_id": 31,
+      "current_spline_id": 28,
       "destination_spline_id": 23,
-      "distance_on_spline": 7.4542165,
-      "speed": 5.0215015,
-      "max_speed": 26.009819,
-      "accel": 3.0638356,
-      "length": 4.46086,
-      "width": 1.8032697
-    },
-    {
-      "route_id": 21,
-      "current_spline_id": 27,
-      "destination_spline_id": 27,
-      "distance_on_spline": 8.517791,
-      "speed": 15.010284,
-      "max_speed": 30.238117,
-      "accel": 2.5227242,
-      "length": 4.226763,
-      "width": 1.9824712
-    },
-    {
-      "route_id": 16,
-      "current_spline_id": 17,
-      "destination_spline_id": 23,
-      "distance_on_spline": 1.5818653,
-      "speed": 4.2737136,
-      "max_speed": 31.869862,
-      "accel": 3.3264678,
-      "length": 4.0818305,
-      "width": 1.8066207
-    },
-    {
-      "route_id": 14,
-      "current_spline_id": 15,
-      "destination_spline_id": 27,
-      "distance_on_spline": 1.2940156,
-      "speed": 4.0959654,
-      "max_speed": 33.410225,
-      "accel": 4.4304976,
-      "length": 4.6973557,
-      "width": 1.926166
-    },
-    {
-      "route_id": 20,
-      "current_spline_id": 21,
-      "destination_spline_id": 25,
-      "distance_on_spline": 6.7171764,
-      "speed": 9.671635,
-      "max_speed": 34.781647,
-      "accel": 4.147672,
-      "length": 4.354324,
-      "width": 1.8483233
-    },
-    {
-      "route_id": 24,
-      "current_spline_id": 22,
-      "destination_spline_id": 29,
-      "distance_on_spline": 9.468006,
-      "speed": 4.5196295,
-      "max_speed": 21.823496,
-      "accel": 2.613799,
-      "length": 4.4557176,
-      "width": 1.9750662
+      "distance_on_spline": 0,
+      "speed": 0,
+      "max_speed": 27.559261,
+      "accel": 3.4342723,
+      "length": 4.126875,
+      "width": 1.8207742
     },
     {
       "route_id": 17,
       "current_spline_id": 28,
       "destination_spline_id": 29,
-      "distance_on_spline": 8.804699,
-      "speed": 6.2805114,
-      "max_speed": 17.944178,
-      "accel": 4.3270693,
-      "length": 4.5607605,
-      "width": 1.9472733
+      "distance_on_spline": 9.784842,
+      "speed": 0.11559461,
+      "max_speed": 23.244114,
+      "accel": 4.1612754,
+      "length": 4.385477,
+      "width": 1.870476
+    },
+    {
+      "route_id": 16,
+      "current_spline_id": 28,
+      "destination_spline_id": 23,
+      "distance_on_spline": 0,
+      "speed": 0,
+      "max_speed": 17.07689,
+      "accel": 3.802997,
+      "length": 4.490629,
+      "width": 1.8009014
+    },
+    {
+      "route_id": 23,
+      "current_spline_id": 23,
+      "destination_spline_id": 23,
+      "distance_on_spline": 0.39658505,
+      "speed": 8.037884,
+      "max_speed": 33.3953,
+      "accel": 3.0782213,
+      "length": 4.6796083,
+      "width": 1.9906145
+    },
+    {
+      "route_id": 24,
+      "current_spline_id": 10,
+      "destination_spline_id": 29,
+      "distance_on_spline": 2.7526639,
+      "speed": 5.1224885,
+      "max_speed": 17.238348,
+      "accel": 3.902783,
+      "length": 4.1548514,
+      "width": 1.9867111
+    },
+    {
+      "route_id": 23,
+      "current_spline_id": 17,
+      "destination_spline_id": 23,
+      "distance_on_spline": 5.7318697,
+      "speed": 3.2349465,
+      "max_speed": 24.534466,
+      "accel": 3.4762793,
+      "length": 4.193426,
+      "width": 1.987313
+    },
+    {
+      "route_id": 22,
+      "current_spline_id": 26,
+      "destination_spline_id": 27,
+      "distance_on_spline": 0.01536507,
+      "speed": 0,
+      "max_speed": 15.220922,
+      "accel": 4.0239534,
+      "length": 4.1300273,
+      "width": 1.8841046
+    },
+    {
+      "route_id": 24,
+      "current_spline_id": 11,
+      "destination_spline_id": 29,
+      "distance_on_spline": 0.7785694,
+      "speed": 3.475168,
+      "max_speed": 35.925247,
+      "accel": 4.4681168,
+      "length": 4.1650844,
+      "width": 1.9901054
+    },
+    {
+      "route_id": 23,
+      "current_spline_id": 26,
+      "destination_spline_id": 23,
+      "distance_on_spline": 0.013557813,
+      "speed": 0,
+      "max_speed": 29.61414,
+      "accel": 3.5908804,
+      "length": 4.200448,
+      "width": 1.8396642
+    },
+    {
+      "route_id": 22,
+      "current_spline_id": 15,
+      "destination_spline_id": 27,
+      "distance_on_spline": 10.506377,
+      "speed": 8.901265,
+      "max_speed": 34.441353,
+      "accel": 3.3729827,
+      "length": 4.694972,
+      "width": 1.8823822
+    },
+    {
+      "route_id": 23,
+      "current_spline_id": 26,
+      "destination_spline_id": 23,
+      "distance_on_spline": 0,
+      "speed": 0,
+      "max_speed": 35.973503,
+      "accel": 4.3895717,
+      "length": 4.4107823,
+      "width": 1.9630271
+    },
+    {
+      "route_id": 23,
+      "current_spline_id": 26,
+      "destination_spline_id": 23,
+      "distance_on_spline": 0.014779592,
+      "speed": 0,
+      "max_speed": 26.54451,
+      "accel": 4.068208,
+      "length": 4.4947033,
+      "width": 1.9923884
+    },
+    {
+      "route_id": 24,
+      "current_spline_id": 26,
+      "destination_spline_id": 29,
+      "distance_on_spline": 0.0015262947,
+      "speed": 0,
+      "max_speed": 14.283388,
+      "accel": 2.6799629,
+      "length": 4.6435204,
+      "width": 1.9322797
+    },
+    {
+      "route_id": 17,
+      "current_spline_id": 31,
+      "destination_spline_id": 29,
+      "distance_on_spline": 5.4417467,
+      "speed": 0.02287437,
+      "max_speed": 25.188873,
+      "accel": 3.2938085,
+      "length": 4.7471094,
+      "width": 1.8502625
+    },
+    {
+      "route_id": 17,
+      "current_spline_id": 28,
+      "destination_spline_id": 29,
+      "distance_on_spline": 4.509267,
+      "speed": 0.07704284,
+      "max_speed": 14.430925,
+      "accel": 3.6979485,
+      "length": 4.161526,
+      "width": 1.913018
+    },
+    {
+      "route_id": 22,
+      "current_spline_id": 22,
+      "destination_spline_id": 27,
+      "distance_on_spline": 6.758965,
+      "speed": 6.3228955,
+      "max_speed": 24.814709,
+      "accel": 2.956055,
+      "length": 4.125662,
+      "width": 1.8357272
+    },
+    {
+      "route_id": 23,
+      "current_spline_id": 10,
+      "destination_spline_id": 23,
+      "distance_on_spline": 12.357937,
+      "speed": 3.733317,
+      "max_speed": 24.82087,
+      "accel": 3.0894709,
+      "length": 4.7279673,
+      "width": 1.972368
+    },
+    {
+      "route_id": 17,
+      "current_spline_id": 28,
+      "destination_spline_id": 29,
+      "distance_on_spline": 0.054739695,
+      "speed": 0,
+      "max_speed": 31.601154,
+      "accel": 3.4012685,
+      "length": 4.319391,
+      "width": 1.9216763
     },
     {
       "route_id": 19,
-      "current_spline_id": 24,
+      "current_spline_id": 19,
       "destination_spline_id": 29,
-      "distance_on_spline": 8.400149,
-      "speed": 6.946613,
-      "max_speed": 19.16182,
-      "accel": 2.8731716,
-      "length": 4.1635356,
-      "width": 1.8410711
-    },
-    {
-      "route_id": 19,
-      "current_spline_id": 24,
-      "destination_spline_id": 29,
-      "distance_on_spline": 0.5911882,
-      "speed": 1.764956,
-      "max_speed": 15.519635,
-      "accel": 3.2170453,
-      "length": 4.1672187,
-      "width": 1.9256352
+      "distance_on_spline": 5.2978096,
+      "speed": 6.2341914,
+      "max_speed": 35.462234,
+      "accel": 2.7444582,
+      "length": 4.0623603,
+      "width": 1.9505087
     },
     {
       "route_id": 15,
-      "current_spline_id": 30,
+      "current_spline_id": 13,
       "destination_spline_id": 23,
-      "distance_on_spline": 5.1064034,
-      "speed": 5.781307,
-      "max_speed": 34.527016,
-      "accel": 3.0345826,
-      "length": 4.4850216,
-      "width": 1.9672657
+      "distance_on_spline": 1.4209974,
+      "speed": 8.278305,
+      "max_speed": 28.716608,
+      "accel": 2.5831382,
+      "length": 4.3862257,
+      "width": 1.9478873
+    },
+    {
+      "route_id": 24,
+      "current_spline_id": 26,
+      "destination_spline_id": 29,
+      "distance_on_spline": 0.056761045,
+      "speed": 0,
+      "max_speed": 31.46205,
+      "accel": 2.8649268,
+      "length": 4.6606145,
+      "width": 1.9631723
+    },
+    {
+      "route_id": 22,
+      "current_spline_id": 26,
+      "destination_spline_id": 27,
+      "distance_on_spline": 4.152062,
+      "speed": 4.746268,
+      "max_speed": 24.4519,
+      "accel": 2.7895598,
+      "length": 4.357119,
+      "width": 1.9924365
+    },
+    {
+      "route_id": 14,
+      "current_spline_id": 30,
+      "destination_spline_id": 27,
+      "distance_on_spline": 4.667956,
+      "speed": 6.2995524,
+      "max_speed": 15.333639,
+      "accel": 4.252911,
+      "length": 4.146093,
+      "width": 1.9804544
     },
     {
       "route_id": 13,
       "current_spline_id": 30,
       "destination_spline_id": 25,
-      "distance_on_spline": 0.010040655,
+      "distance_on_spline": 0.042268764,
       "speed": 0,
-      "max_speed": 35.25018,
-      "accel": 4.15934,
-      "length": 4.3385324,
-      "width": 1.9558185
+      "max_speed": 32.618355,
+      "accel": 3.7513804,
+      "length": 4.153719,
+      "width": 1.8364313
     },
     {
-      "route_id": 22,
-      "current_spline_id": 26,
-      "destination_spline_id": 27,
-      "distance_on_spline": 2.4049332,
-      "speed": 4.530771,
-      "max_speed": 33.552193,
-      "accel": 3.5165377,
-      "length": 4.553996,
-      "width": 1.9667432
-    },
-    {
-      "route_id": 20,
-      "current_spline_id": 24,
+      "route_id": 18,
+      "current_spline_id": 28,
       "destination_spline_id": 25,
-      "distance_on_spline": 0.10079522,
+      "distance_on_spline": 0,
       "speed": 0,
-      "max_speed": 24.433414,
-      "accel": 3.1686478,
-      "length": 4.7796965,
-      "width": 1.8143777
-    },
-    {
-      "route_id": 22,
-      "current_spline_id": 26,
-      "destination_spline_id": 27,
-      "distance_on_spline": 0.004497021,
-      "speed": 0.2540232,
-      "max_speed": 34.5945,
-      "accel": 4.0177107,
-      "length": 4.282867,
-      "width": 1.9375014
+      "max_speed": 30.610157,
+      "accel": 4.3548417,
+      "length": 4.3752556,
+      "width": 1.8410256
     }
   ]
 }
