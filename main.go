@@ -816,8 +816,14 @@ func computeBrakingDecisions(cars []Car, splines []Spline, vehicleCounts map[int
 	}
 
 	predictions := make([][]TrajectorySample, len(cars))
+	stationaryPredictions := make([][]TrajectorySample, len(cars))
 	for i, car := range cars {
 		predictions[i] = predictCarTrajectory(car, splines, vehicleCounts, predictionHorizonSeconds, predictionStepSeconds)
+		// Pre-compute stationary trajectory: car standing still at its current position.
+		// Used to filter out conflicts that braking cannot resolve.
+		stationaryCar := car
+		stationaryCar.Speed = 0
+		stationaryPredictions[i] = predictCarTrajectory(stationaryCar, splines, vehicleCounts, predictionHorizonSeconds, predictionStepSeconds)
 	}
 
 	for i := 0; i < len(cars); i++ {
@@ -840,6 +846,18 @@ func computeBrakingDecisions(cars []Car, splines []Spline, vehicleCounts map[int
 			}
 			if blameJ && recentlyLeft(cars[j], cars[i].CurrentSplineID) {
 				blameJ = false
+			}
+			// Suppress blame if the conflict would happen even when the blamed car is
+			// standing still — braking can never resolve such a conflict.
+			if blameI {
+				if _, still := predictCollision(stationaryPredictions[i], predictions[j], cars[i], cars[j]); still {
+					blameI = false
+				}
+			}
+			if blameJ {
+				if _, still := predictCollision(stationaryPredictions[j], predictions[i], cars[j], cars[i]); still {
+					blameJ = false
+				}
 			}
 			if blameI {
 				initialBlame[i] = true
