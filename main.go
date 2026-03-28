@@ -54,6 +54,8 @@ const (
 	ModeEdit EditorMode = iota
 	ModeRoute
 	ModePriority
+	ModeCouple
+	ModeCut
 )
 
 const (
@@ -114,6 +116,18 @@ const (
 	followHeadingCos float32 = 0.766
 )
 
+const (
+	// Lane changing: temporary Bézier spline bridging two coupled lanes.
+	// Total manoeuvre time ≈ 2 × laneChangeHalfSecs.
+	laneChangeHalfSecs float32 = 1.0 // handle arm length = speed × this (s)
+	laneChangeMinSpeed float32 = 3.0 // minimum m/s to attempt a lane change
+	// Minimum dot product of car heading vs destination lane tangent (cos 45° ≈ 0.71).
+	// Prevents switching onto a lane going the wrong way.
+	laneChangeDirCos     float32 = 0.71
+	laneChangeCooldownS  float32 = 5.0 // seconds between lane-change checks (testing value)
+	laneChangeRetrySecs  float32 = 1.0 // retry delay when conditions not met
+)
+
 type Spline struct {
 	ID       int
 	Priority bool
@@ -123,10 +137,11 @@ type Spline struct {
 	P2 rl.Vector2
 	P3 rl.Vector2
 
-	Length      float32
-	SpeedFactor float32
-	Samples     [simSamples + 1]rl.Vector2
-	CumLen      [simSamples + 1]float32
+	Length           float32
+	SpeedFactor      float32
+	Samples          [simSamples + 1]rl.Vector2
+	CumLen           [simSamples + 1]float32
+	CoupledSplineIDs []int // parallel/adjacent lanes coupled to this one
 }
 
 type Draft struct {
@@ -139,6 +154,19 @@ type Draft struct {
 
 	LockP1           bool
 	ContinuationFrom int
+}
+
+// CutDraft holds state for the spline-cut mode.
+// Stage StageIdle   → user is hovering, snap dot follows nearest spline point.
+// Stage StageSetP1  → cut point is locked; user places the tangent handle.
+type CutDraft struct {
+	OriginalSplineID       int
+	OriginalSplinePriority bool
+	CutPoint               rl.Vector2
+	CutT                   float32
+	// de Casteljau sub-spline control points
+	LeftP  [4]rl.Vector2 // left half  P0..P3
+	RightP [4]rl.Vector2 // right half P0..P3
 }
 
 type EndHit struct {
@@ -189,6 +217,13 @@ type Car struct {
 	Width               float32
 	Color               rl.Color
 	Braking             bool
+
+	// Lane-change state.
+	LaneChanging       bool
+	LaneChangeSplineID int     // ID of the temporary bridging spline; -1 = none
+	AfterSplineID      int     // destination spline to continue on after the bridge
+	AfterSplineDist    float32 // arc-length on AfterSplineID where the bridge lands
+	LaneChangeCooldown float32 // seconds until the next lane-change eligibility check
 }
 
 type TrajectorySample struct {
@@ -222,12 +257,13 @@ type SavedSplineFile struct {
 }
 
 type SavedSpline struct {
-	ID       int        `json:"id"`
-	Priority bool       `json:"priority"`
-	P0       rl.Vector2 `json:"p0"`
-	P1       rl.Vector2 `json:"p1"`
-	P2       rl.Vector2 `json:"p2"`
-	P3       rl.Vector2 `json:"p3"`
+	ID         int        `json:"id"`
+	Priority   bool       `json:"priority"`
+	P0         rl.Vector2 `json:"p0"`
+	P1         rl.Vector2 `json:"p1"`
+	P2         rl.Vector2 `json:"p2"`
+	P3         rl.Vector2 `json:"p3"`
+	CoupledIDs []int      `json:"coupled_ids,omitempty"`
 }
 
 type SavedRoute struct {
@@ -266,14 +302,17 @@ func main() {
 	)
 
 	splines := make([]Spline, 0, 128)
+	laneChangeSplines := make([]Spline, 0, 32)
 	routes := make([]Route, 0, 32)
 	cars := make([]Car, 0, 256)
 
 	mode := ModeEdit
 	stage := StageIdle
 	draft := newDraft()
+	cutDraft := newCutDraft()
 	routePanel := RoutePanel{}
 	routeStartSplineID := -1
+	coupleModeFirstID := -1
 	debugMode := false
 	nextSplineID := 1
 	nextRouteID := 1
@@ -299,34 +338,64 @@ func main() {
 				mode = ModeRoute
 			case ModeRoute:
 				mode = ModePriority
+			case ModePriority:
+				mode = ModeCouple
+			case ModeCouple:
+				mode = ModeCut
 			default:
 				mode = ModeEdit
 			}
 			stage = StageIdle
 			draft = newDraft()
+			cutDraft = newCutDraft()
 			routePanel = RoutePanel{}
 			routeStartSplineID = -1
+			coupleModeFirstID = -1
 		}
 		if rl.IsKeyPressed(rl.KeyE) {
 			mode = ModeEdit
 			stage = StageIdle
 			draft = newDraft()
+			cutDraft = newCutDraft()
 			routePanel = RoutePanel{}
 			routeStartSplineID = -1
+			coupleModeFirstID = -1
 		}
 		if rl.IsKeyPressed(rl.KeyR) {
 			mode = ModeRoute
 			stage = StageIdle
 			draft = newDraft()
+			cutDraft = newCutDraft()
 			routePanel = RoutePanel{}
 			routeStartSplineID = -1
+			coupleModeFirstID = -1
 		}
 		if rl.IsKeyPressed(rl.KeyP) {
 			mode = ModePriority
 			stage = StageIdle
 			draft = newDraft()
+			cutDraft = newCutDraft()
 			routePanel = RoutePanel{}
 			routeStartSplineID = -1
+			coupleModeFirstID = -1
+		}
+		if rl.IsKeyPressed(rl.KeyL) {
+			mode = ModeCouple
+			stage = StageIdle
+			draft = newDraft()
+			cutDraft = newCutDraft()
+			routePanel = RoutePanel{}
+			routeStartSplineID = -1
+			coupleModeFirstID = -1
+		}
+		if rl.IsKeyPressed(rl.KeyC) {
+			mode = ModeCut
+			stage = StageIdle
+			draft = newDraft()
+			cutDraft = newCutDraft()
+			routePanel = RoutePanel{}
+			routeStartSplineID = -1
+			coupleModeFirstID = -1
 		}
 		if rl.IsKeyPressed(rl.KeyD) {
 			debugMode = !debugMode
@@ -361,8 +430,11 @@ func main() {
 					cars = loadedCars
 					stage = StageIdle
 					draft = newDraft()
+					cutDraft = newCutDraft()
+					laneChangeSplines = laneChangeSplines[:0]
 					routePanel = RoutePanel{}
 					routeStartSplineID = -1
+					coupleModeFirstID = -1
 					nextSplineID = loadedNextSplineID
 					nextRouteID = loadedNextRouteID
 					noticeText = fmt.Sprintf("Loaded %d splines, %d routes, %d cars from %s", len(splines), len(routes), len(cars), path)
@@ -390,9 +462,12 @@ func main() {
 
 		vehicleCounts := buildVehicleCounts(cars)
 		routes = updateRouteVisuals(routes, splines, vehicleCounts)
-		brakingDecisions, debugBlameLinks := computeBrakingDecisions(cars, splines, vehicleCounts)
-		followCaps := computeFollowingSpeedCaps(cars, splines)
-		cars = updateCars(cars, routes, splines, vehicleCounts, brakingDecisions, followCaps, dt)
+		laneChangeSplines, cars = computeLaneChanges(cars, splines, laneChangeSplines, &nextSplineID, dt)
+		allSplines := mergedSplines(splines, laneChangeSplines)
+		brakingDecisions, debugBlameLinks := computeBrakingDecisions(cars, allSplines, vehicleCounts)
+		followCaps := computeFollowingSpeedCaps(cars, allSplines)
+		cars = updateCars(cars, routes, allSplines, vehicleCounts, brakingDecisions, followCaps, dt)
+		laneChangeSplines = gcLaneChangeSplines(laneChangeSplines, cars)
 		routes, cars = updateRouteSpawning(routes, cars, splines, dt)
 
 		if routePanel.Open {
@@ -411,6 +486,7 @@ func main() {
 				if topologyChanged {
 					routes = refreshRoutes(routes, splines)
 					cars = cars[:0]
+					laneChangeSplines = laneChangeSplines[:0]
 				}
 			case ModeRoute:
 				var notice string
@@ -421,6 +497,16 @@ func main() {
 				}
 			case ModePriority:
 				splines = handlePriorityMode(splines, hoveredSpline)
+			case ModeCouple:
+				coupleModeFirstID, splines = handleCoupleMode(coupleModeFirstID, splines, hoveredSpline)
+			case ModeCut:
+				var topologyChanged bool
+				stage, cutDraft, splines, nextSplineID, topologyChanged = handleCutMode(stage, cutDraft, splines, mouseWorld, nextSplineID)
+				if topologyChanged {
+					routes = refreshRoutes(routes, splines)
+					cars = cars[:0]
+					laneChangeSplines = laneChangeSplines[:0]
+				}
 			}
 		}
 
@@ -475,9 +561,17 @@ func main() {
 			drawRoutePicking(routeStartSplineID, routePanel, hoveredStart, hoveredEnd, splines, vehicleCounts, camera.Zoom)
 		}
 
-		drawCars(cars, splines, camera.Zoom)
+		if mode == ModeCouple {
+			drawCoupleMode(splines, coupleModeFirstID, hoveredSpline, camera.Zoom)
+		}
+		if mode == ModeCut {
+			drawCutMode(stage, cutDraft, splines, mouseWorld, camera.Zoom)
+		}
+		drawCars(cars, allSplines, camera.Zoom)
 		if debugMode {
-			drawDebugBlameLinks(debugBlameLinks, cars, splines, camera.Zoom)
+			drawDebugBlameLinks(debugBlameLinks, cars, allSplines, camera.Zoom)
+			drawDebugLaneLines(cars, splines, camera.Zoom)
+			drawLaneChangeSplines(laneChangeSplines, camera.Zoom)
 		}
 		rl.EndMode2D()
 
@@ -487,7 +581,7 @@ func main() {
 				drawDraftInfo(stage, draft, mouseWorld, preview, camera)
 			}
 		}
-		drawHud(mode, stage, draft, hoveredSpline, routeStartSplineID, debugMode, camera.Zoom, len(splines), len(routes), len(cars))
+		drawHud(mode, stage, draft, hoveredSpline, routeStartSplineID, coupleModeFirstID, debugMode, camera.Zoom, len(splines), len(routes), len(cars))
 		if routePanel.Open {
 			drawRoutePanel(routePanel, routes)
 		}
@@ -506,7 +600,9 @@ func handleEditMode(stage Stage, draft Draft, splines []Spline, hoveredSpline in
 		switch stage {
 		case StageIdle:
 			if hoveredSpline >= 0 {
+				deletedID := splines[hoveredSpline].ID
 				splines = append(splines[:hoveredSpline], splines[hoveredSpline+1:]...)
+				splines = removeSplineFromCouplings(splines, deletedID)
 				topologyChanged = true
 			}
 		case StageSetP1, StageSetP2:
@@ -621,6 +717,469 @@ func handlePriorityMode(splines []Spline, hoveredSpline int) []Spline {
 		splines[hoveredSpline].Priority = false
 	}
 	return splines
+}
+
+func handleCoupleMode(firstID int, splines []Spline, hoveredSpline int) (int, []Spline) {
+	if rl.IsKeyPressed(rl.KeyEscape) || rl.IsMouseButtonPressed(rl.MouseButtonRight) {
+		return -1, splines
+	}
+	if !rl.IsMouseButtonPressed(rl.MouseButtonLeft) || hoveredSpline < 0 {
+		return firstID, splines
+	}
+
+	clickedID := splines[hoveredSpline].ID
+
+	if firstID < 0 {
+		// Select first spline.
+		return clickedID, splines
+	}
+	if clickedID == firstID {
+		// Clicked the same spline — deselect.
+		return -1, splines
+	}
+
+	// Toggle coupling between firstID and clickedID.
+	splines = toggleCoupling(splines, firstID, clickedID)
+	return -1, splines
+}
+
+// toggleCoupling adds or removes a bidirectional coupling between two splines.
+func toggleCoupling(splines []Spline, idA, idB int) []Spline {
+	idxA := findSplineIndexByID(splines, idA)
+	idxB := findSplineIndexByID(splines, idB)
+	if idxA < 0 || idxB < 0 {
+		return splines
+	}
+
+	// Check if already coupled.
+	alreadyCoupled := false
+	for _, id := range splines[idxA].CoupledSplineIDs {
+		if id == idB {
+			alreadyCoupled = true
+			break
+		}
+	}
+
+	if alreadyCoupled {
+		splines[idxA].CoupledSplineIDs = removeInt(splines[idxA].CoupledSplineIDs, idB)
+		splines[idxB].CoupledSplineIDs = removeInt(splines[idxB].CoupledSplineIDs, idA)
+	} else {
+		splines[idxA].CoupledSplineIDs = append(splines[idxA].CoupledSplineIDs, idB)
+		splines[idxB].CoupledSplineIDs = append(splines[idxB].CoupledSplineIDs, idA)
+	}
+	return splines
+}
+
+// removeSplineFromCouplings removes all references to deletedID from every spline's coupled list.
+func removeSplineFromCouplings(splines []Spline, deletedID int) []Spline {
+	for i := range splines {
+		splines[i].CoupledSplineIDs = removeInt(splines[i].CoupledSplineIDs, deletedID)
+	}
+	return splines
+}
+
+func findSplineIndexByID(splines []Spline, id int) int {
+	for i, s := range splines {
+		if s.ID == id {
+			return i
+		}
+	}
+	return -1
+}
+
+func removeInt(slice []int, val int) []int {
+	out := slice[:0]
+	for _, v := range slice {
+		if v != val {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// nearestSampleOnSpline returns the position of the precomputed sample on spline
+// that is closest (Euclidean) to pos.
+func nearestSampleOnSpline(spline Spline, pos rl.Vector2) rl.Vector2 {
+	best := spline.Samples[0]
+	bestDSq := distSq(best, pos)
+	for i := 1; i <= simSamples; i++ {
+		d := distSq(spline.Samples[i], pos)
+		if d < bestDSq {
+			bestDSq = d
+			best = spline.Samples[i]
+		}
+	}
+	return best
+}
+
+// nearestSampleWithDist returns both the world position and the arc-length
+// distance along the spline for the sample closest to pos.
+func nearestSampleWithDist(spline Spline, pos rl.Vector2) (point rl.Vector2, dist float32) {
+	point = spline.Samples[0]
+	dist = spline.CumLen[0]
+	bestDSq := distSq(point, pos)
+	for i := 1; i <= simSamples; i++ {
+		d := distSq(spline.Samples[i], pos)
+		if d < bestDSq {
+			bestDSq = d
+			point = spline.Samples[i]
+			dist = spline.CumLen[i]
+		}
+	}
+	return
+}
+
+// mergedSplines returns a slice containing all permanent splines followed by
+// all lane-change splines. Returns permanent directly if there are no temporaries.
+func mergedSplines(permanent, temporary []Spline) []Spline {
+	if len(temporary) == 0 {
+		return permanent
+	}
+	all := make([]Spline, 0, len(permanent)+len(temporary))
+	all = append(all, permanent...)
+	all = append(all, temporary...)
+	return all
+}
+
+// gcLaneChangeSplines removes any lane-change splines that no car is currently
+// travelling on, freeing memory and keeping the slice compact.
+func gcLaneChangeSplines(lcs []Spline, cars []Car) []Spline {
+	out := lcs[:0]
+	for _, lc := range lcs {
+		for _, car := range cars {
+			if car.LaneChangeSplineID == lc.ID {
+				out = append(out, lc)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// computeLaneChanges ticks each car's lane-change cooldown and, when it fires,
+// attempts to build a temporary bridging spline onto a coupled lane.
+// Every car checks every ~laneChangeCooldownS seconds (staggered at spawn).
+func computeLaneChanges(cars []Car, splines []Spline, lcs []Spline, nextID *int, dt float32) ([]Spline, []Car) {
+	splineIndexByID := buildSplineIndexByID(splines)
+
+	for i := range cars {
+		car := &cars[i]
+		car.LaneChangeCooldown -= dt
+
+		if car.LaneChanging || car.LaneChangeCooldown > 0 {
+			continue
+		}
+		if car.Speed < laneChangeMinSpeed {
+			car.LaneChangeCooldown = laneChangeRetrySecs
+			continue
+		}
+
+		splineIdx, ok := splineIndexByID[car.CurrentSplineID]
+		if !ok || len(splines[splineIdx].CoupledSplineIDs) == 0 {
+			car.LaneChangeCooldown = laneChangeCooldownS
+			continue
+		}
+		currentSpline := splines[splineIdx]
+		carPos, carHeading := sampleSplineAtDistance(currentSpline, car.DistanceOnSpline)
+		halfDist := car.Speed * laneChangeHalfSecs
+
+		switched := false
+		for _, destID := range currentSpline.CoupledSplineIDs {
+			destIdx, ok := splineIndexByID[destID]
+			if !ok {
+				continue
+			}
+			destSpline := splines[destIdx]
+
+			// P1: one handle-length ahead along the current tangent.
+			p1 := vecAdd(carPos, vecScale(carHeading, halfDist))
+
+			// Find the crossing anchor: nearest point on the dest spline to P1.
+			// P3 is then placed halfDist *further* along the dest spline from
+			// that anchor, so the bridge arrives already aligned with traffic
+			// instead of landing perpendicularly.
+			_, crossDist := nearestSampleWithDist(destSpline, p1)
+
+			if destSpline.Length-crossDist < halfDist {
+				continue
+			}
+			p3Dist := crossDist + halfDist
+			p3, destHeading := sampleSplineAtDistance(destSpline, p3Dist)
+
+			// Heading check: destination must be going roughly the same direction.
+			if carHeading.X*destHeading.X+carHeading.Y*destHeading.Y < laneChangeDirCos {
+				continue
+			}
+
+			// P2: one handle-length back along the destination tangent from P3.
+			p2 := vecSub(p3, vecScale(destHeading, halfDist))
+
+			// Build and register the temporary bridging spline.
+			id := *nextID
+			*nextID++
+			bridgeSpline := newSpline(id, carPos, p1, p2, p3)
+			lcs = append(lcs, bridgeSpline)
+
+			// Commit the lane change on the car.
+			car.PrevSplineIDs[1] = car.PrevSplineIDs[0]
+			car.PrevSplineIDs[0] = car.CurrentSplineID
+			car.CurrentSplineID = id
+			car.DistanceOnSpline = 0
+			car.LaneChanging = true
+			car.LaneChangeSplineID = id
+			car.AfterSplineID = destID
+			car.AfterSplineDist = p3Dist
+			car.LaneChangeCooldown = laneChangeCooldownS
+
+			switched = true
+			break
+		}
+
+		if !switched {
+			car.LaneChangeCooldown = laneChangeCooldownS
+		}
+	}
+
+	return lcs, cars
+}
+
+// drawLaneChangeSplines renders active lane-change bridge splines in a
+// distinctive magenta colour, visible only when debug mode is on.
+func drawLaneChangeSplines(lcs []Spline, zoom float32) {
+	if len(lcs) == 0 {
+		return
+	}
+	color := rl.NewColor(230, 60, 230, 220)
+	dimColor := rl.NewColor(230, 60, 230, 100)
+	thickness := pixelsToWorld(zoom, 2.5)
+	handleR := pixelsToWorld(zoom, 4)
+	armThick := pixelsToWorld(zoom, 1)
+
+	for _, s := range lcs {
+		drawSpline(s, thickness, color)
+		// Draw the Bézier handles so it's clear where the curve is steered.
+		rl.DrawLineEx(s.P0, s.P1, armThick, dimColor)
+		rl.DrawLineEx(s.P3, s.P2, armThick, dimColor)
+		rl.DrawCircleV(s.P1, handleR, color)
+		rl.DrawCircleV(s.P2, handleR, color)
+	}
+}
+
+// drawCoupleMode draws coupling relationship lines between coupled splines
+// and highlights the currently selected first spline.
+func drawCoupleMode(splines []Spline, firstSelectedID int, hoveredSpline int, zoom float32) {
+	lineColor := rl.NewColor(80, 180, 255, 180)
+	selectedColor := rl.NewColor(255, 200, 50, 255)
+	hoveredColor := rl.NewColor(255, 140, 30, 200)
+	thickness := pixelsToWorld(zoom, 2)
+
+	// Draw all coupling links (draw once per unique pair by only drawing when idA < idB).
+	for _, spline := range splines {
+		midA := spline.Samples[simSamples/2]
+		for _, coupledID := range spline.CoupledSplineIDs {
+			if coupledID <= spline.ID {
+				continue // draw each pair once
+			}
+			idx := findSplineIndexByID(splines, coupledID)
+			if idx < 0 {
+				continue
+			}
+			midB := splines[idx].Samples[simSamples/2]
+			rl.DrawLineEx(midA, midB, thickness, lineColor)
+			// Draw small circles at both midpoints to make the link obvious.
+			r := pixelsToWorld(zoom, 5)
+			rl.DrawCircleV(midA, r, lineColor)
+			rl.DrawCircleV(midB, r, lineColor)
+		}
+	}
+
+	// Highlight the hovered spline.
+	if hoveredSpline >= 0 {
+		mid := splines[hoveredSpline].Samples[simSamples/2]
+		rl.DrawCircleV(mid, pixelsToWorld(zoom, 8), hoveredColor)
+	}
+
+	// Highlight the first selected spline.
+	if firstSelectedID >= 0 {
+		idx := findSplineIndexByID(splines, firstSelectedID)
+		if idx >= 0 {
+			mid := splines[idx].Samples[simSamples/2]
+			rl.DrawCircleV(mid, pixelsToWorld(zoom, 10), selectedColor)
+		}
+	}
+}
+
+// drawDebugLaneLines draws, for each car on a spline with coupled lanes,
+// a line from the car's current position to the nearest point on each coupled spline.
+func drawDebugLaneLines(cars []Car, splines []Spline, zoom float32) {
+	lineColor := rl.NewColor(100, 220, 255, 200)
+	dotColor := rl.NewColor(100, 220, 255, 255)
+	thickness := pixelsToWorld(zoom, 1.5)
+	dotR := pixelsToWorld(zoom, 3)
+
+	splineIndexByID := buildSplineIndexByID(splines)
+
+	for _, car := range cars {
+		splineIdx, ok := splineIndexByID[car.CurrentSplineID]
+		if !ok {
+			continue
+		}
+		currentSpline := splines[splineIdx]
+		if len(currentSpline.CoupledSplineIDs) == 0 {
+			continue
+		}
+
+		carPos, _ := sampleSplineAtDistance(currentSpline, car.DistanceOnSpline)
+
+		for _, coupledID := range currentSpline.CoupledSplineIDs {
+			cIdx, ok := splineIndexByID[coupledID]
+			if !ok {
+				continue
+			}
+			nearest := nearestSampleOnSpline(splines[cIdx], carPos)
+			rl.DrawLineEx(carPos, nearest, thickness, lineColor)
+			rl.DrawCircleV(nearest, dotR, dotColor)
+		}
+	}
+}
+
+func newCutDraft() CutDraft {
+	return CutDraft{OriginalSplineID: -1}
+}
+
+// splitBezierAt splits a cubic Bézier at parameter t using de Casteljau's algorithm.
+// Returns control points for the left (t=0..t) and right (t..1) sub-curves.
+func splitBezierAt(p0, p1, p2, p3 rl.Vector2, t float32) ([4]rl.Vector2, [4]rl.Vector2) {
+	lerp2 := func(a, b rl.Vector2, t float32) rl.Vector2 {
+		return rl.Vector2{X: a.X + (b.X-a.X)*t, Y: a.Y + (b.Y-a.Y)*t}
+	}
+	a1 := lerp2(p0, p1, t)
+	a2 := lerp2(p1, p2, t)
+	a3 := lerp2(p2, p3, t)
+	b1 := lerp2(a1, a2, t)
+	b2 := lerp2(a2, a3, t)
+	cut := lerp2(b1, b2, t)
+	left := [4]rl.Vector2{p0, a1, b1, cut}
+	right := [4]rl.Vector2{cut, b2, a3, p3}
+	return left, right
+}
+
+// findNearestSplinePoint searches all precomputed samples across all splines and
+// returns the one closest to pos. Returns splineIndex, sample t (0..1), world position.
+func findNearestSplinePoint(splines []Spline, pos rl.Vector2) (splineIndex int, t float32, point rl.Vector2, found bool) {
+	bestDSq := float32(math.MaxFloat32)
+	for si, spline := range splines {
+		for i := 0; i <= simSamples; i++ {
+			d := distSq(spline.Samples[i], pos)
+			if d < bestDSq {
+				bestDSq = d
+				splineIndex = si
+				t = float32(i) / float32(simSamples)
+				point = spline.Samples[i]
+				found = true
+			}
+		}
+	}
+	return
+}
+
+func handleCutMode(stage Stage, cd CutDraft, splines []Spline, mouseWorld rl.Vector2, nextSplineID int) (Stage, CutDraft, []Spline, int, bool) {
+	if rl.IsKeyPressed(rl.KeyEscape) || rl.IsMouseButtonPressed(rl.MouseButtonRight) {
+		return StageIdle, newCutDraft(), splines, nextSplineID, false
+	}
+
+	switch stage {
+	case StageIdle:
+		if !rl.IsMouseButtonPressed(rl.MouseButtonLeft) {
+			break
+		}
+		si, t, point, found := findNearestSplinePoint(splines, mouseWorld)
+		if !found {
+			break
+		}
+		spline := splines[si]
+		left, right := splitBezierAt(spline.P0, spline.P1, spline.P2, spline.P3, t)
+		return StageSetP1, CutDraft{
+			OriginalSplineID:       spline.ID,
+			OriginalSplinePriority: spline.Priority,
+			CutPoint:               point,
+			CutT:                   t,
+			LeftP:                  left,
+			RightP:                 right,
+		}, splines, nextSplineID, false
+
+	case StageSetP1:
+		if !rl.IsMouseButtonPressed(rl.MouseButtonLeft) {
+			break
+		}
+		H := mouseWorld
+		mirror := rl.Vector2{X: 2*cd.CutPoint.X - H.X, Y: 2*cd.CutPoint.Y - H.Y}
+
+		// Build the two final splines. Left keeps its P0/P1, gets new P2=mirror.
+		// Right gets new P1=H, keeps its P2/P3.
+		newLeft := newSpline(nextSplineID, cd.LeftP[0], cd.LeftP[1], mirror, cd.LeftP[3])
+		newLeft.Priority = cd.OriginalSplinePriority
+		nextSplineID++
+		newRight := newSpline(nextSplineID, cd.RightP[0], H, cd.RightP[2], cd.RightP[3])
+		newRight.Priority = cd.OriginalSplinePriority
+		nextSplineID++
+
+		// Remove original spline (find by ID in case slice shifted).
+		idx := findSplineIndexByID(splines, cd.OriginalSplineID)
+		if idx >= 0 {
+			splines = removeSplineFromCouplings(splines, cd.OriginalSplineID)
+			splines = append(splines[:idx], splines[idx+1:]...)
+		}
+		splines = append(splines, newLeft, newRight)
+
+		return StageIdle, newCutDraft(), splines, nextSplineID, true
+	}
+
+	return stage, cd, splines, nextSplineID, false
+}
+
+func drawCutMode(stage Stage, cd CutDraft, splines []Spline, mouseWorld rl.Vector2, zoom float32) {
+	snapColor := rl.NewColor(255, 180, 0, 255)
+	handleColor := rl.NewColor(255, 220, 60, 220)
+	leftColor := rl.NewColor(80, 210, 120, 255)
+	rightColor := rl.NewColor(80, 140, 230, 255)
+	thickness := pixelsToWorld(zoom, 3)
+	handleR := pixelsToWorld(zoom, 5)
+	snapR := pixelsToWorld(zoom, 8)
+
+	switch stage {
+	case StageIdle:
+		// Snap dot follows the nearest point on any spline.
+		_, _, point, found := findNearestSplinePoint(splines, mouseWorld)
+		if found {
+			rl.DrawCircleV(point, snapR, snapColor)
+			// Small crosshair lines.
+			arm := pixelsToWorld(zoom, 10)
+			rl.DrawLineEx(rl.Vector2{X: point.X - arm, Y: point.Y}, rl.Vector2{X: point.X + arm, Y: point.Y}, pixelsToWorld(zoom, 1.5), snapColor)
+			rl.DrawLineEx(rl.Vector2{X: point.X, Y: point.Y - arm}, rl.Vector2{X: point.X, Y: point.Y + arm}, pixelsToWorld(zoom, 1.5), snapColor)
+		}
+
+	case StageSetP1:
+		H := mouseWorld
+		mirror := rl.Vector2{X: 2*cd.CutPoint.X - H.X, Y: 2*cd.CutPoint.Y - H.Y}
+
+		// Preview left spline (green): original P0/P1, new P2=mirror, cut point.
+		previewLeft := newSpline(0, cd.LeftP[0], cd.LeftP[1], mirror, cd.LeftP[3])
+		// Preview right spline (blue): cut point, H, original P2, original P3.
+		previewRight := newSpline(0, cd.RightP[0], H, cd.RightP[2], cd.RightP[3])
+
+		drawSpline(previewLeft, thickness, leftColor)
+		drawSpline(previewRight, thickness, rightColor)
+
+		// Handle lines from cut point to both control handles.
+		rl.DrawLineEx(cd.CutPoint, H, pixelsToWorld(zoom, 1.5), handleColor)
+		rl.DrawLineEx(cd.CutPoint, mirror, pixelsToWorld(zoom, 1.5), handleColor)
+		rl.DrawCircleV(H, handleR, rightColor)
+		rl.DrawCircleV(mirror, handleR, leftColor)
+
+		// Cut point marker.
+		rl.DrawCircleV(cd.CutPoint, snapR, snapColor)
+	}
 }
 
 func updateRoutePanel(panel RoutePanel, routes []Route, cars []Car, nextRouteID *int) (RoutePanel, []Route, []Car, bool) {
@@ -798,6 +1357,9 @@ func spawnCar(route Route) Car {
 		Width:               randRange(1.8, 2.0) / metersPerUnit, // world units
 		Color:               route.Color,
 		Braking:             false,
+		LaneChangeSplineID:  -1,
+		AfterSplineID:       -1,
+		LaneChangeCooldown:  rand.Float32() * laneChangeCooldownS,
 	}
 }
 
@@ -991,12 +1553,24 @@ func predictCarTrajectory(car Car, splines []Spline, vehicleCounts map[int]int, 
 				break
 			}
 
-			move -= remaining
-			simCar.DistanceOnSpline = currentSpline.Length
+			overshoot := move - remaining
+			move = overshoot
+			simCar.DistanceOnSpline = 0
 
 			if simCar.CurrentSplineID == simCar.DestinationSplineID {
 				active = false
 				break
+			}
+
+			// Lane-change bridge completed in trajectory sim.
+			if simCar.LaneChanging && simCar.CurrentSplineID == simCar.LaneChangeSplineID {
+				simCar.PrevSplineIDs[1] = simCar.PrevSplineIDs[0]
+				simCar.PrevSplineIDs[0] = simCar.CurrentSplineID
+				simCar.CurrentSplineID = simCar.AfterSplineID
+				simCar.DistanceOnSpline = simCar.AfterSplineDist
+				simCar.LaneChanging = false
+				simCar.LaneChangeSplineID = -1
+				continue
 			}
 
 			nextSplineID, ok := chooseNextSplineOnBestPath(splines, simCar.CurrentSplineID, simCar.DestinationSplineID, vehicleCounts)
@@ -1005,7 +1579,6 @@ func predictCarTrajectory(car Car, splines []Spline, vehicleCounts map[int]int, 
 				break
 			}
 			simCar.CurrentSplineID = nextSplineID
-			simCar.DistanceOnSpline = 0
 		}
 	}
 
@@ -1280,9 +1853,21 @@ func updateCars(cars []Car, routes []Route, splines []Spline, vehicleCounts map[
 				break
 			}
 
-			car.DistanceOnSpline -= currentSpline.Length
+			overshoot := car.DistanceOnSpline - currentSpline.Length
+			car.DistanceOnSpline = overshoot
 			if car.CurrentSplineID == car.DestinationSplineID {
 				break
+			}
+
+			// Lane-change bridge completed: resume on the destination lane.
+			if car.LaneChanging && car.CurrentSplineID == car.LaneChangeSplineID {
+				car.PrevSplineIDs[1] = car.PrevSplineIDs[0]
+				car.PrevSplineIDs[0] = car.CurrentSplineID
+				car.CurrentSplineID = car.AfterSplineID
+				car.DistanceOnSpline = car.AfterSplineDist + overshoot
+				car.LaneChanging = false
+				car.LaneChangeSplineID = -1
+				continue
 			}
 
 			nextSplineID, ok := chooseNextSplineOnBestPath(splines, car.CurrentSplineID, car.DestinationSplineID, vehicleCounts)
@@ -1450,7 +2035,7 @@ func drawNotice(text string) {
 	rl.DrawText(text, x+14, y+8, 18, rl.White)
 }
 
-func drawHud(mode EditorMode, stage Stage, draft Draft, hoveredSpline int, routeStartSplineID int, debugMode bool, zoom float32, splineCount, routeCount, carCount int) {
+func drawHud(mode EditorMode, stage Stage, draft Draft, hoveredSpline int, routeStartSplineID int, coupleModeFirstID int, debugMode bool, zoom float32, splineCount, routeCount, carCount int) {
 	panel := rl.NewColor(248, 248, 250, 240)
 	outline := rl.NewColor(210, 210, 215, 255)
 	text := rl.NewColor(30, 30, 35, 255)
@@ -1472,6 +2057,20 @@ func drawHud(mode EditorMode, stage Stage, draft Draft, hoveredSpline int, route
 	case ModePriority:
 		modeText = "Priority paint"
 		statusText = "Left click marks hovered spline as priority, right click clears it"
+	case ModeCouple:
+		modeText = "Lane coupling"
+		if coupleModeFirstID >= 0 {
+			statusText = fmt.Sprintf("Click a second spline to couple/uncouple with spline #%d (right-click cancels)", coupleModeFirstID)
+		} else {
+			statusText = "Click a spline to select it as the first lane"
+		}
+	case ModeCut:
+		modeText = "Cut spline"
+		if stage == StageSetP1 {
+			statusText = "Place the tangent handle at the cut point (right-click cancels)"
+		} else {
+			statusText = "Click on a spline to set the cut point"
+		}
 	}
 
 	hoverText := "none"
@@ -1484,8 +2083,8 @@ func drawHud(mode EditorMode, stage Stage, draft Draft, hoveredSpline int, route
 	}
 
 	rl.DrawText("Traffic spline editor", 24, 24, 22, text)
-	rl.DrawText("E: edit | R: route | P: priority | D: debug | Ctrl+S: save as | Ctrl+O: open | Tab: cycle modes", 24, 54, 18, muted)
-	rl.DrawText("Priority splines are painted purple. Debug draws blame lines from braking cars to feared collision cars.", 24, 78, 18, muted)
+	rl.DrawText("E: edit | R: route | P: priority | L: lane couple | C: cut spline | D: debug | Ctrl+S: save | Ctrl+O: open | Tab: cycle", 24, 54, 18, muted)
+	rl.DrawText("Priority splines are purple. Debug draws blame lines and lane-change projection lines.", 24, 78, 18, muted)
 	rl.DrawText(fmt.Sprintf("Mode: %s   Status: %s", modeText, statusText), 24, 108, 18, text)
 	rl.DrawText(fmt.Sprintf("Splines: %d   Routes: %d   Cars: %d   Hovered: %s   Debug: %s   Zoom: %.2fx   Scale: 1 unit = 1 m", splineCount, routeCount, carCount, hoverText, debugText, zoom), 24, 132, 18, text)
 }
@@ -2186,12 +2785,13 @@ func saveSplineFile(splines []Spline, routes []Route, cars []Car, path string) e
 	}
 	for _, spline := range splines {
 		saved.Splines = append(saved.Splines, SavedSpline{
-			ID:       spline.ID,
-			Priority: spline.Priority,
-			P0:       spline.P0,
-			P1:       spline.P1,
-			P2:       spline.P2,
-			P3:       spline.P3,
+			ID:         spline.ID,
+			Priority:   spline.Priority,
+			P0:         spline.P0,
+			P1:         spline.P1,
+			P2:         spline.P2,
+			P3:         spline.P3,
+			CoupledIDs: append([]int(nil), spline.CoupledSplineIDs...),
 		})
 	}
 	for _, route := range routes {
@@ -2240,6 +2840,7 @@ func loadSplineFile(path string) ([]Spline, []Route, []Car, int, int, error) {
 	for _, entry := range saved.Splines {
 		spline := newSpline(entry.ID, entry.P0, entry.P1, entry.P2, entry.P3)
 		spline.Priority = entry.Priority
+		spline.CoupledSplineIDs = append([]int(nil), entry.CoupledIDs...)
 		loadedSplines = append(loadedSplines, spline)
 		if entry.ID > maxSplineID {
 			maxSplineID = entry.ID
@@ -2273,6 +2874,7 @@ func loadSplineFile(path string) ([]Spline, []Route, []Car, int, int, error) {
 			RouteID:             entry.RouteID,
 			CurrentSplineID:     entry.CurrentSplineID,
 			DestinationSplineID: entry.DestinationSplineID,
+			PrevSplineIDs:       [2]int{-1, -1},
 			DistanceOnSpline:    entry.DistanceOnSpline,
 			Speed:               entry.Speed,
 			MaxSpeed:            entry.MaxSpeed,
@@ -2281,6 +2883,9 @@ func loadSplineFile(path string) ([]Spline, []Route, []Car, int, int, error) {
 			Width:               entry.Width,
 			Color:               routeColorByID[entry.RouteID],
 			Braking:             false,
+			LaneChangeSplineID:  -1,
+			AfterSplineID:       -1,
+			LaneChangeCooldown:  rand.Float32() * laneChangeCooldownS,
 		}
 		loadedCars = append(loadedCars, car)
 	}
