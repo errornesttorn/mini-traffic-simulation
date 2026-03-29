@@ -125,8 +125,9 @@ const (
 	laneChangeMinSpeed float32 = 3.0 // minimum m/s to attempt a lane change
 	// Minimum dot product of car heading vs destination lane tangent (cos 45° ≈ 0.71).
 	// Prevents switching onto a lane going the wrong way.
-	laneChangeDirCos         float32 = 0.71
-	maxCarSpeed              float32 = 36.1       // m/s — upper bound of car MaxSpeed range (130 km/h)
+	laneChangeDirCos              float32 = 0.71
+	preferenceChangeCooldownS    float32 = 10.0       // seconds between preference-based lane-change checks
+	maxCarSpeed                  float32 = 36.1       // m/s — upper bound of car MaxSpeed range (130 km/h)
 	laneChangeForcedSpeedMPS float32 = 20.0 / 3.6 // 20 km/h — speed for last-resort lane switch
 	laneChangeForcedDistEnd  float32 = 15.0       // metres before spline end where last-resort fires
 )
@@ -233,6 +234,8 @@ type Car struct {
 	// neighbour of the next physical spline does have a path).
 	DesiredLaneSplineID int     // spline to merge into; -1 = none
 	DesiredLaneDeadline float32 // arc-length on current spline beyond which the switch must start
+
+	PreferenceCooldown float32 // seconds until the next preference-based lane-change check
 }
 
 type TrajectorySample struct {
@@ -499,7 +502,7 @@ func main() {
 
 		vehicleCounts := buildVehicleCounts(cars)
 		routes = updateRouteVisuals(routes, splines, vehicleCounts)
-		laneChangeSplines, cars = computeLaneChanges(cars, splines, laneChangeSplines, &nextSplineID, dt)
+		laneChangeSplines, cars = computeLaneChanges(cars, splines, laneChangeSplines, &nextSplineID, vehicleCounts, dt)
 		allSplines := mergedSplines(splines, laneChangeSplines)
 		brakingDecisions, debugBlameLinks := computeBrakingDecisions(cars, allSplines, vehicleCounts)
 		followCaps := computeFollowingSpeedCaps(cars, allSplines, vehicleCounts)
@@ -1288,7 +1291,8 @@ func gcLaneChangeSplines(lcs []Spline, cars []Car) []Spline {
 // computeLaneChanges handles desired-lane switches for each car.
 // Cars with a DesiredLaneSplineID attempt to merge as soon as a safe gap
 // exists; at the deadline the switch is forced regardless of gap.
-func computeLaneChanges(cars []Car, splines []Spline, lcs []Spline, nextID *int, dt float32) ([]Spline, []Car) {
+// Preference-based switches are attempted at most every preferenceChangeCooldownS seconds.
+func computeLaneChanges(cars []Car, splines []Spline, lcs []Spline, nextID *int, vehicleCounts map[int]int, dt float32) ([]Spline, []Car) {
 	splineIndexByID := buildSplineIndexByID(splines)
 
 	for i := range cars {
@@ -1324,10 +1328,71 @@ func computeLaneChanges(cars []Car, splines []Spline, lcs []Spline, nextID *int,
 					}
 				}
 			}
+			continue
+		}
+
+		// Preference-based lane change: opportunistically move to a coupled lane
+		// with a higher preference (lower number). Gated by a cooldown so the
+		// behaviour is soft — cars drift toward preferred lanes, not snap to them.
+		car.PreferenceCooldown -= dt
+		if car.PreferenceCooldown <= 0 {
+			car.PreferenceCooldown = preferenceChangeCooldownS
+			if destID := findBetterPreferenceLane(*car, splines, splineIndexByID); destID >= 0 {
+				if _, _, pathOk := findShortestPathWeighted(splines, destID, car.DestinationSplineID, vehicleCounts); pathOk {
+					srcIdx, srcOk := splineIndexByID[car.CurrentSplineID]
+					destIdx, destOk := splineIndexByID[destID]
+					if srcOk && destOk {
+						if p3Dist, feasible := laneChangeLandingDist(*car, splines[srcIdx], splines[destIdx]); feasible {
+							if isLaneChangeLandingSafe(p3Dist, destID, *car, cars) {
+								if newLcs, ok := buildLaneChangeBridge(car, destID, splines, splineIndexByID, lcs, nextID, false); ok {
+									lcs = newLcs
+								}
+							}
+						}
+					}
+				}
+			}
 		}
 	}
 
 	return lcs, cars
+}
+
+// findBetterPreferenceLane returns the ID of the coupled lane with the highest
+// preference (lowest non-zero LanePreference) that is strictly better than the
+// car's current lane. Lanes with no preference (0) are never considered as targets.
+// Returns -1 if no better lane exists.
+func findBetterPreferenceLane(car Car, splines []Spline, splineIndexByID map[int]int) int {
+	idx, ok := splineIndexByID[car.CurrentSplineID]
+	if !ok {
+		return -1
+	}
+	currentSpline := splines[idx]
+	currentPref := currentSpline.LanePreference // 0 = no preference assigned
+
+	allCoupled := append(append([]int(nil), currentSpline.HardCoupledIDs...), currentSpline.SoftCoupledIDs...)
+	bestPref := 0
+	bestID := -1
+	for _, coupledID := range allCoupled {
+		cIdx, cOk := splineIndexByID[coupledID]
+		if !cOk {
+			continue
+		}
+		coupled := splines[cIdx]
+		if coupled.LanePreference <= 0 {
+			continue // unpreferred lanes are never a target
+		}
+		// Must be strictly better (lower number) than the current lane.
+		// A car on an unpreferred lane (0) considers any preferred lane better.
+		if currentPref != 0 && coupled.LanePreference >= currentPref {
+			continue
+		}
+		if bestID < 0 || coupled.LanePreference < bestPref {
+			bestPref = coupled.LanePreference
+			bestID = coupledID
+		}
+	}
+	return bestID
 }
 
 // drawLaneChangeSplines renders active lane-change bridge splines in a
@@ -1720,6 +1785,7 @@ func spawnCar(route Route) Car {
 		AfterSplineID:       -1,
 
 		DesiredLaneSplineID: -1,
+		PreferenceCooldown:  rand.Float32() * preferenceChangeCooldownS,
 	}
 }
 
@@ -3362,6 +3428,7 @@ func loadSplineFile(path string) ([]Spline, []Route, []Car, int, int, error) {
 			AfterSplineID:       -1,
 	
 			DesiredLaneSplineID: -1,
+		PreferenceCooldown:  rand.Float32() * preferenceChangeCooldownS,
 		}
 		loadedCars = append(loadedCars, car)
 	}
