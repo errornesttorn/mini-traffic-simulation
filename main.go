@@ -94,7 +94,7 @@ const (
 	// All car dimensions, speeds, and accelerations are stored in SI units (m, m/s, m/s²).
 	metersPerUnit float32 = 1.0
 
-	predictionHorizonSeconds float32 = 4.0
+	predictionHorizonSeconds float32 = 2.0
 	predictionStepSeconds    float32 = 0.15
 	blameAngleThresholdDeg   float32 = 45.0
 	brakeDecelMultiplier     float32 = 2.5
@@ -124,7 +124,7 @@ const (
 	laneChangeMinSpeed float32 = 3.0 // minimum m/s to attempt a lane change
 	// Minimum dot product of car heading vs destination lane tangent (cos 45° ≈ 0.71).
 	// Prevents switching onto a lane going the wrong way.
-	laneChangeDirCos    float32 = 0.71
+	laneChangeDirCos         float32 = 0.71
 	laneChangeCooldownS      float32 = 5.0        // seconds between lane-change checks (testing value)
 	laneChangeRetrySecs      float32 = 1.0        // retry delay when conditions not met
 	maxCarSpeed              float32 = 36.1       // m/s — upper bound of car MaxSpeed range (130 km/h)
@@ -141,12 +141,12 @@ type Spline struct {
 	P2 rl.Vector2
 	P3 rl.Vector2
 
-	Length           float32
-	SpeedFactor      float32
-	Samples          [simSamples + 1]rl.Vector2
-	CumLen           [simSamples + 1]float32
-	HardCoupledIDs []int // parallel lanes that also act as pathfinding neighbours
-	SoftCoupledIDs []int // parallel lanes used for lane-changes only, not routing
+	Length         float32
+	SpeedFactor    float32
+	Samples        [simSamples + 1]rl.Vector2
+	CumLen         [simSamples + 1]float32
+	HardCoupledIDs []int   // parallel lanes that also act as pathfinding neighbours
+	SoftCoupledIDs []int   // parallel lanes used for lane-changes only, not routing
 	SpeedLimitKmh  float32 // 0 = no limit
 }
 
@@ -268,15 +268,15 @@ type SavedSplineFile struct {
 }
 
 type SavedSpline struct {
-	ID         int        `json:"id"`
-	Priority   bool       `json:"priority"`
-	P0         rl.Vector2 `json:"p0"`
-	P1         rl.Vector2 `json:"p1"`
-	P2         rl.Vector2 `json:"p2"`
-	P3         rl.Vector2 `json:"p3"`
-	HardCoupledIDs []int   `json:"hard_coupled_ids,omitempty"`
-	SoftCoupledIDs []int   `json:"soft_coupled_ids,omitempty"`
-	SpeedLimitKmh  float32 `json:"speed_limit_kmh,omitempty"`
+	ID             int        `json:"id"`
+	Priority       bool       `json:"priority"`
+	P0             rl.Vector2 `json:"p0"`
+	P1             rl.Vector2 `json:"p1"`
+	P2             rl.Vector2 `json:"p2"`
+	P3             rl.Vector2 `json:"p3"`
+	HardCoupledIDs []int      `json:"hard_coupled_ids,omitempty"`
+	SoftCoupledIDs []int      `json:"soft_coupled_ids,omitempty"`
+	SpeedLimitKmh  float32    `json:"speed_limit_kmh,omitempty"`
 }
 
 type SavedRoute struct {
@@ -495,7 +495,7 @@ func main() {
 		laneChangeSplines, cars = computeLaneChanges(cars, splines, laneChangeSplines, &nextSplineID, dt, randomLaneChanges, forceLaneChange)
 		allSplines := mergedSplines(splines, laneChangeSplines)
 		brakingDecisions, debugBlameLinks := computeBrakingDecisions(cars, allSplines, vehicleCounts)
-		followCaps := computeFollowingSpeedCaps(cars, allSplines)
+		followCaps := computeFollowingSpeedCaps(cars, allSplines, vehicleCounts)
 		cars = updateCars(cars, routes, allSplines, vehicleCounts, brakingDecisions, followCaps, dt)
 		laneChangeSplines = gcLaneChangeSplines(laneChangeSplines, cars)
 		routes, cars = updateRouteSpawning(routes, cars, splines, dt)
@@ -1331,8 +1331,8 @@ func drawLaneChangeSplines(lcs []Spline, zoom float32) {
 // drawCoupleMode draws coupling relationship lines between coupled splines
 // and highlights the currently selected first spline.
 func drawCoupleMode(splines []Spline, firstSelectedID int, hoveredSpline int, zoom float32) {
-	hardColor := rl.NewColor(80, 180, 255, 180)   // blue — hard coupling
-	softColor := rl.NewColor(180, 120, 255, 180)   // purple — soft coupling
+	hardColor := rl.NewColor(80, 180, 255, 180)  // blue — hard coupling
+	softColor := rl.NewColor(180, 120, 255, 180) // purple — soft coupling
 	selectedColor := rl.NewColor(255, 200, 50, 255)
 	hoveredColor := rl.NewColor(255, 140, 30, 200)
 	thickness := pixelsToWorld(zoom, 2)
@@ -2094,7 +2094,7 @@ func blameLeftCar(collision CollisionPrediction, carA, carB Car) (bool, bool) {
 // target due to a leading car ahead on the same path. The cap equals the
 // leader's current speed. Returns math.MaxFloat32 (no cap) when no leader is
 // found within followLookaheadM or the car is already braking.
-func computeFollowingSpeedCaps(cars []Car, splines []Spline) []float32 {
+func computeFollowingSpeedCaps(cars []Car, splines []Spline, vehicleCounts map[int]int) []float32 {
 	caps := make([]float32, len(cars))
 	for i := range caps {
 		caps[i] = math.MaxFloat32
@@ -2117,6 +2117,33 @@ func computeFollowingSpeedCaps(cars []Car, splines []Spline) []float32 {
 		poses[i] = carPose{p, h}
 	}
 
+	// Pre-compute the set of spline IDs each car will traverse within followLookaheadM.
+	pathSets := make([]map[int]bool, len(cars))
+	for i, car := range cars {
+		set := map[int]bool{car.CurrentSplineID: true}
+		covered := float32(0)
+		curIdx, ok := splineIndexByID[car.CurrentSplineID]
+		if ok {
+			// Distance remaining on the current spline.
+			covered -= (splines[curIdx].Length - car.DistanceOnSpline)
+			curID := car.CurrentSplineID
+			for covered < followLookaheadM {
+				nextID, ok2 := chooseNextSplineOnBestPath(splines, curID, car.DestinationSplineID, vehicleCounts)
+				if !ok2 {
+					break
+				}
+				set[nextID] = true
+				nextIdx, ok3 := splineIndexByID[nextID]
+				if !ok3 {
+					break
+				}
+				covered += splines[nextIdx].Length
+				curID = nextID
+			}
+		}
+		pathSets[i] = set
+	}
+
 	for i, car := range cars {
 		hI := poses[i].heading
 		pI := poses[i].pos
@@ -2127,6 +2154,10 @@ func computeFollowingSpeedCaps(cars []Car, splines []Spline) []float32 {
 
 		for j, other := range cars {
 			if i == j {
+				continue
+			}
+			// Other car must be on this car's predicted path.
+			if !pathSets[i][other.CurrentSplineID] {
 				continue
 			}
 			// Must be going in roughly the same direction.
@@ -3232,12 +3263,12 @@ func saveSplineFile(splines []Spline, routes []Route, cars []Car, path string) e
 	}
 	for _, spline := range splines {
 		saved.Splines = append(saved.Splines, SavedSpline{
-			ID:         spline.ID,
-			Priority:   spline.Priority,
-			P0:         spline.P0,
-			P1:         spline.P1,
-			P2:         spline.P2,
-			P3:         spline.P3,
+			ID:             spline.ID,
+			Priority:       spline.Priority,
+			P0:             spline.P0,
+			P1:             spline.P1,
+			P2:             spline.P2,
+			P3:             spline.P3,
 			HardCoupledIDs: append([]int(nil), spline.HardCoupledIDs...),
 			SoftCoupledIDs: append([]int(nil), spline.SoftCoupledIDs...),
 			SpeedLimitKmh:  spline.SpeedLimitKmh,
