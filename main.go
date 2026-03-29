@@ -128,8 +128,8 @@ const (
 	laneChangeCooldownS      float32 = 5.0        // seconds between lane-change checks (testing value)
 	laneChangeRetrySecs      float32 = 1.0        // retry delay when conditions not met
 	maxCarSpeed              float32 = 36.1       // m/s — upper bound of car MaxSpeed range (130 km/h)
-	laneChangeForcedSpeedMPS float32 = 10.0 / 3.6 // 10 km/h — speed for last-resort lane switch
-	laneChangeForcedDistEnd  float32 = 10.0       // metres before spline end where last-resort fires
+	laneChangeForcedSpeedMPS float32 = 20.0 / 3.6 // 20 km/h — speed for last-resort lane switch
+	laneChangeForcedDistEnd  float32 = 15.0       // metres before spline end where last-resort fires
 )
 
 type Spline struct {
@@ -963,25 +963,26 @@ func laneChangeLandingDist(car Car, srcSpline, destSpline Spline) (float32, bool
 // would not immediately collide with cars already there.
 // Rear cars are given a speed-adjusted gap (2 s of closure distance).
 func isLaneChangeLandingSafe(p3Dist float32, destSplineID int, switchingCar Car, cars []Car) bool {
-	minGap := switchingCar.Length + 2.0
+	T := 2 * laneChangeHalfSecs // lane change duration in seconds
+	const safetyMargin = 2.0
 	for _, other := range cars {
 		if other.CurrentSplineID != destSplineID {
 			continue
 		}
-		diff := other.DistanceOnSpline - p3Dist
-		if diff >= 0 {
-			if diff < minGap {
+		halfLengths := (switchingCar.Length + other.Length) / 2
+		// Predict where each car will be when the merge completes.
+		// Switching car lands at p3Dist. Other car travels other.Speed*T further.
+		otherPosAtLanding := other.DistanceOnSpline + other.Speed*T
+		gapAtLanding := (otherPosAtLanding - p3Dist) // positive = other is ahead, negative = behind
+		if gapAtLanding >= 0 {
+			// Other car will be ahead at landing — bumper gap must be positive.
+			if gapAtLanding < halfLengths+safetyMargin {
 				return false
 			}
 		} else {
-			behind := -diff
-			if behind < minGap {
+			// Other car will be behind at landing — switching car rear must clear its front.
+			if -gapAtLanding < halfLengths+safetyMargin {
 				return false
-			}
-			if other.Speed > switchingCar.Speed {
-				if behind < (other.Speed-switchingCar.Speed)*2.0 {
-					return false
-				}
 			}
 		}
 	}
