@@ -963,7 +963,7 @@ func laneChangeLandingDist(car Car, srcSpline, destSpline Spline) (float32, bool
 // would not immediately collide with cars already there.
 // Rear cars are given a speed-adjusted gap (2 s of closure distance).
 func isLaneChangeLandingSafe(p3Dist float32, destSplineID int, switchingCar Car, cars []Car) bool {
-	minGap := switchingCar.Length + 4.0
+	minGap := switchingCar.Length + 2.0
 	for _, other := range cars {
 		if other.CurrentSplineID != destSplineID {
 			continue
