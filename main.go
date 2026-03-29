@@ -964,7 +964,9 @@ func findForcedLaneChangePath(splines []Spline, currentSplineID, destSplineID in
 // buildLaneChangeBridge attempts to build a Bézier bridge from the car's
 // current position to destSplineID. Modifies *car and appends to lcs on
 // success. Returns the updated lcs slice and whether it succeeded.
-func buildLaneChangeBridge(car *Car, destSplineID int, splines []Spline, splineIndexByID map[int]int, lcs []Spline, nextID *int) ([]Spline, bool) {
+// When forced is true the minimum speed check is skipped and a floor of
+// laneChangeMinSpeed is used for halfDist, so slow cars can still switch.
+func buildLaneChangeBridge(car *Car, destSplineID int, splines []Spline, splineIndexByID map[int]int, lcs []Spline, nextID *int, forced bool) ([]Spline, bool) {
 	srcIdx, ok := splineIndexByID[car.CurrentSplineID]
 	if !ok {
 		return lcs, false
@@ -973,14 +975,18 @@ func buildLaneChangeBridge(car *Car, destSplineID int, splines []Spline, splineI
 	if !ok {
 		return lcs, false
 	}
-	if car.Speed < laneChangeMinSpeed {
+	if !forced && car.Speed < laneChangeMinSpeed {
 		return lcs, false
 	}
 
 	srcSpline := splines[srcIdx]
 	destSpline := splines[destIdx]
 	carPos, carHeading := sampleSplineAtDistance(srcSpline, car.DistanceOnSpline)
-	halfDist := car.Speed * laneChangeHalfSecs
+	effectiveSpeed := car.Speed
+	if forced && effectiveSpeed < laneChangeMinSpeed {
+		effectiveSpeed = laneChangeMinSpeed
+	}
+	halfDist := effectiveSpeed * laneChangeHalfSecs
 
 	p1 := vecAdd(carPos, vecScale(carHeading, halfDist))
 	_, crossDist := nearestSampleWithDist(destSpline, p1)
@@ -1206,14 +1212,15 @@ func computeLaneChanges(cars []Car, splines []Spline, lcs []Spline, nextID *int,
 			continue
 		}
 
-		// If a forced lane switch is pending, handle only that — skip random changes.
+		// If a forced lane switch is pending, attempt it every tick — the
+		// crossDist == 0 check inside the builder naturally prevents too-early
+		// switches. Trying eagerly avoids the one-frame blind spot that arises
+		// from computeLaneChanges running before updateCars moves the car.
 		if car.DesiredLaneSplineID >= 0 {
-			if car.DistanceOnSpline >= car.DesiredLaneDeadline {
-				if newLcs, ok := buildLaneChangeBridge(car, car.DesiredLaneSplineID, splines, splineIndexByID, lcs, nextID); ok {
-					lcs = newLcs
-					car.DesiredLaneSplineID = -1
-					car.DesiredLaneDeadline = 0
-				}
+			if newLcs, ok := buildLaneChangeBridge(car, car.DesiredLaneSplineID, splines, splineIndexByID, lcs, nextID, true); ok {
+				lcs = newLcs
+				car.DesiredLaneSplineID = -1
+				car.DesiredLaneDeadline = 0
 			}
 			continue
 		}
@@ -1242,7 +1249,7 @@ func computeLaneChanges(cars []Car, splines []Spline, lcs []Spline, nextID *int,
 
 		switched := false
 		for _, destID := range allCoupled {
-			if newLcs, ok := buildLaneChangeBridge(car, destID, splines, splineIndexByID, lcs, nextID); ok {
+			if newLcs, ok := buildLaneChangeBridge(car, destID, splines, splineIndexByID, lcs, nextID, false); ok {
 				lcs = newLcs
 				switched = true
 				break
