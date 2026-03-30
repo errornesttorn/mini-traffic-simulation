@@ -310,6 +310,57 @@ type SavedCar struct {
 	CurveSpeedMultiplier float32 `json:"curve_speed_multiplier,omitempty"`
 }
 
+// uiFont is the Ubuntu font used for all on-screen text.
+var uiFont rl.Font
+
+// toolbarItem describes one button in the mode toolbar.
+type toolbarItem struct {
+	key   string
+	label string
+	mode  EditorMode
+	isDbg bool // true for the debug toggle button
+}
+
+// toolbarItems is the ordered list of toolbar buttons.
+var toolbarItems = []toolbarItem{
+	{"E", "Edit", ModeEdit, false},
+	{"R", "Route", ModeRoute, false},
+	{"P", "Priority", ModePriority, false},
+	{"L", "Couple", ModeCouple, false},
+	{"C", "Cut", ModeCut, false},
+	{"S", "Speed", ModeSpeedLimit, false},
+	{"V", "Prefer", ModePreference, false},
+	{"D", "Debug", 0, true},
+}
+
+const (
+	toolbarBtnW   = 70
+	toolbarBtnH   = 75
+	toolbarBtnGap = 5
+	toolbarX      = 12
+	toolbarY      = 12
+)
+
+func toolbarBtnRect(i int) rl.Rectangle {
+	x := float32(toolbarX) + float32(i)*(toolbarBtnW+toolbarBtnGap)
+	return rl.NewRectangle(x, float32(toolbarY), toolbarBtnW, toolbarBtnH)
+}
+
+func isMouseOverToolbar(mouse rl.Vector2) bool {
+	n := len(toolbarItems)
+	totalW := float32(n*toolbarBtnW + (n-1)*toolbarBtnGap)
+	return mouse.X >= float32(toolbarX) && mouse.X <= float32(toolbarX)+totalW &&
+		mouse.Y >= float32(toolbarY) && mouse.Y <= float32(toolbarY+toolbarBtnH)
+}
+
+func drawText(text string, x, y, size int32, color rl.Color) {
+	rl.DrawTextEx(uiFont, text, rl.NewVector2(float32(x), float32(y)), float32(size), 1, color)
+}
+
+func measureText(text string, size int32) int32 {
+	return int32(rl.MeasureTextEx(uiFont, text, float32(size), 1).X)
+}
+
 func main() {
 	rand.Seed(time.Now().UnixNano())
 
@@ -317,6 +368,13 @@ func main() {
 	rl.InitWindow(initialWidth, initialHeight, "raylib-go traffic spline editor")
 	defer rl.CloseWindow()
 	rl.SetTargetFPS(144)
+
+	uiFont = rl.LoadFontEx("/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf", 48, nil, 0)
+	if uiFont.CharsCount == 0 {
+		uiFont = rl.GetFontDefault()
+	}
+	rl.SetTextureFilter(uiFont.Texture, rl.FilterBilinear)
+	defer rl.UnloadFont(uiFont)
 
 	camera := rl.NewCamera2D(
 		rl.NewVector2(float32(rl.GetScreenWidth())/2, float32(rl.GetScreenHeight())/2),
@@ -499,6 +557,27 @@ func main() {
 
 		mouseScreen := rl.GetMousePosition()
 		mouseWorld := rl.GetScreenToWorld2D(mouseScreen, camera)
+		mouseOnToolbar := isMouseOverToolbar(mouseScreen)
+
+		// Toolbar click — switch mode / toggle debug
+		if rl.IsMouseButtonPressed(rl.MouseButtonLeft) && mouseOnToolbar {
+			for i, item := range toolbarItems {
+				if rl.CheckCollisionPointRec(mouseScreen, toolbarBtnRect(i)) {
+					if item.isDbg {
+						debugMode = !debugMode
+					} else {
+						mode = item.mode
+						stage = StageIdle
+						draft = newDraft()
+						cutDraft = newCutDraft()
+						routePanel = RoutePanel{}
+						routeStartSplineID = -1
+						coupleModeFirstID = -1
+					}
+					break
+				}
+			}
+		}
 
 		hoverRadius := pixelsToWorld(camera.Zoom, hoverPixels)
 		snapRadius := pixelsToWorld(camera.Zoom, snapPixels)
@@ -527,7 +606,7 @@ func main() {
 			}
 		}
 
-		if !routePanel.Open {
+		if !routePanel.Open && !mouseOnToolbar {
 			switch mode {
 			case ModeEdit:
 				var topologyChanged bool
@@ -819,9 +898,11 @@ func handleSpeedLimitMode(splines []Spline, hoveredSpline, selectedSpeedKmh int)
 	}
 	if rl.IsMouseButtonPressed(rl.MouseButtonLeft) {
 		splines[hoveredSpline].SpeedLimitKmh = float32(selectedSpeedKmh)
+		splines[hoveredSpline].CurveSpeedMPS = buildCurveSpeedProfile(&splines[hoveredSpline])
 	}
 	if rl.IsMouseButtonPressed(rl.MouseButtonRight) {
 		splines[hoveredSpline].SpeedLimitKmh = 0
+		splines[hoveredSpline].CurveSpeedMPS = buildCurveSpeedProfile(&splines[hoveredSpline])
 	}
 	return splines
 }
@@ -884,12 +965,12 @@ func drawSpeedLimitLabels(splines []Spline, camera rl.Camera2D) {
 		screen := rl.GetWorldToScreen2D(mid, camera)
 		label := fmt.Sprintf("%d", int(spline.SpeedLimitKmh))
 		fontSize := int32(14)
-		textW := rl.MeasureText(label, fontSize)
+		textW := measureText(label, fontSize)
 		r := int32(14)
 		cx, cy := int32(screen.X), int32(screen.Y)
 		rl.DrawCircle(cx, cy, float32(r), rl.White)
 		rl.DrawCircleLines(cx, cy, float32(r), rl.NewColor(200, 30, 30, 255))
-		rl.DrawText(label, cx-textW/2, cy-fontSize/2, fontSize, rl.NewColor(200, 30, 30, 255))
+		drawText(label, cx-textW/2, cy-fontSize/2, fontSize, rl.NewColor(200, 30, 30, 255))
 	}
 }
 
@@ -905,12 +986,12 @@ func drawPreferenceLabels(splines []Spline, camera rl.Camera2D) {
 		screen := rl.GetWorldToScreen2D(mid, camera)
 		label := fmt.Sprintf("%d", spline.LanePreference)
 		fontSize := int32(14)
-		textW := rl.MeasureText(label, fontSize)
+		textW := measureText(label, fontSize)
 		r := int32(14)
 		cx, cy := int32(screen.X), int32(screen.Y)
 		rl.DrawCircle(cx, cy, float32(r), rl.White)
 		rl.DrawCircleLines(cx, cy, float32(r), color)
-		rl.DrawText(label, cx-textW/2, cy-fontSize/2, fontSize, color)
+		drawText(label, cx-textW/2, cy-fontSize/2, fontSize, color)
 	}
 }
 
@@ -940,7 +1021,7 @@ func drawSpeedLimitPanel(selectedSpeedKmh int) {
 	panelH := int32(7*32 + 32)
 	rl.DrawRectangle(panelX, 172, panelW, panelH, bg)
 	rl.DrawRectangleLines(panelX, 172, panelW, panelH, outline)
-	rl.DrawText("Speed limit", panelX+8, 178, 16, text)
+	drawText("Speed limit", panelX+8, 178, 16, text)
 
 	for i, kmh := range speedLimitSteps() {
 		col := i / 7
@@ -951,11 +1032,11 @@ func drawSpeedLimitPanel(selectedSpeedKmh int) {
 		if kmh == selectedSpeedKmh {
 			rl.DrawRectangle(bx, by, 76, 24, selBg)
 			rl.DrawRectangleLines(bx, by, 76, 24, rl.NewColor(150, 20, 20, 255))
-			rl.DrawText(label, bx+6, by+5, 14, selText)
+			drawText(label, bx+6, by+5, 14, selText)
 		} else {
 			rl.DrawRectangle(bx, by, 76, 24, rl.NewColor(235, 236, 240, 255))
 			rl.DrawRectangleLines(bx, by, 76, 24, outline)
-			rl.DrawText(label, bx+6, by+5, 14, text)
+			drawText(label, bx+6, by+5, 14, text)
 		}
 	}
 }
@@ -2522,8 +2603,8 @@ func drawCarSpeedLabels(cars []Car, splines []Spline, camera rl.Camera2D) {
 		pos, _ := sampleSplineAtDistance(splines[splineIdx], car.DistanceOnSpline)
 		screen := rl.GetWorldToScreen2D(pos, camera)
 		label := fmt.Sprintf("%d", int(car.Speed*3.6))
-		textW := rl.MeasureText(label, fontSize)
-		rl.DrawText(label, int32(screen.X)-textW/2, int32(screen.Y)-18, fontSize, rl.Black)
+		textW := measureText(label, fontSize)
+		drawText(label, int32(screen.X)-textW/2, int32(screen.Y)-18, fontSize, rl.Black)
 	}
 }
 
@@ -2613,13 +2694,13 @@ func drawRoutePanel(panel RoutePanel, routes []Route) {
 	if panel.ExistingRouteID >= 0 {
 		title = "Edit existing route"
 	}
-	rl.DrawText(title, int32(panelRect.X+18), int32(panelRect.Y+16), 22, text)
-	rl.DrawText(fmt.Sprintf("Start spline #%d → end spline #%d", panel.StartSplineID, panel.EndSplineID), int32(panelRect.X+18), int32(panelRect.Y+44), 18, muted)
+	drawText(title, int32(panelRect.X+18), int32(panelRect.Y+16), 22, text)
+	drawText(fmt.Sprintf("Start spline #%d → end spline #%d", panel.StartSplineID, panel.EndSplineID), int32(panelRect.X+18), int32(panelRect.Y+44), 18, muted)
 	meanSeconds := float32(0)
 	if panel.SpawnPerMinute > 0 {
 		meanSeconds = 60 / panel.SpawnPerMinute
 	}
-	rl.DrawText(fmt.Sprintf("Average spawn frequency: %.1f cars/min  (mean %.1fs)", panel.SpawnPerMinute, meanSeconds), int32(panelRect.X+18), int32(panelRect.Y+64), 18, text)
+	drawText(fmt.Sprintf("Average spawn frequency: %.1f cars/min  (mean %.1fs)", panel.SpawnPerMinute, meanSeconds), int32(panelRect.X+18), int32(panelRect.Y+64), 18, text)
 
 	rl.DrawRectangle(int32(sliderRect.X), int32(sliderRect.Y), int32(sliderRect.Width), int32(sliderRect.Height), rl.NewColor(229, 229, 234, 255))
 	fillWidth := sliderRect.Width * clampf(panel.SpawnPerMinute/spawnSliderMaxPerMinute, 0, 1)
@@ -2644,79 +2725,93 @@ func drawRoutePanel(panel RoutePanel, routes []Route) {
 	rl.DrawRectangle(int32(cancelRect.X), int32(cancelRect.Y), int32(cancelRect.Width), int32(cancelRect.Height), button)
 	rl.DrawRectangleLines(int32(applyRect.X), int32(applyRect.Y), int32(applyRect.Width), int32(applyRect.Height), outline)
 	rl.DrawRectangleLines(int32(cancelRect.X), int32(cancelRect.Y), int32(cancelRect.Width), int32(cancelRect.Height), outline)
-	rl.DrawText(applyLabel, int32(applyRect.X+34), int32(applyRect.Y+7), 20, text)
-	rl.DrawText("Close", int32(cancelRect.X+34), int32(cancelRect.Y+7), 20, text)
-	rl.DrawText(fmt.Sprintf("Current weighted cost: %.0f", panel.PathLength), int32(panelRect.X+18), int32(panelRect.Y+158), 16, muted)
+	drawText(applyLabel, int32(applyRect.X+34), int32(applyRect.Y+7), 20, text)
+	drawText("Close", int32(cancelRect.X+34), int32(cancelRect.Y+7), 20, text)
+	drawText(fmt.Sprintf("Current weighted cost: %.0f", panel.PathLength), int32(panelRect.X+18), int32(panelRect.Y+158), 16, muted)
 	_ = routes
 }
 
 func drawNotice(text string) {
-	width := int32(18 + len(text)*9)
+	width := measureText(text, 18) + 28
 	x := int32((int32(rl.GetScreenWidth()) - width) / 2)
 	y := int32(rl.GetScreenHeight() - 54)
 	bg := rl.NewColor(40, 44, 52, 230)
 	rl.DrawRectangle(x, y, width, 34, bg)
-	rl.DrawText(text, x+14, y+8, 18, rl.White)
+	drawText(text, x+14, y+8, 18, rl.White)
+}
+
+func modeStatusText(mode EditorMode, stage Stage, draft Draft, routeStartSplineID, coupleModeFirstID int) string {
+	switch mode {
+	case ModeEdit:
+		return stageLabel(stage, draft)
+	case ModeRoute:
+		if routeStartSplineID >= 0 {
+			return fmt.Sprintf("Pick destination for start spline #%d", routeStartSplineID)
+		}
+		return "Click a spline start to begin a route"
+	case ModePriority:
+		return "Left click: set priority   Right click: clear"
+	case ModeCouple:
+		if coupleModeFirstID >= 0 {
+			return fmt.Sprintf("Click second spline to couple/decouple with #%d  (right-click cancels)", coupleModeFirstID)
+		}
+		return "Click a spline to select it"
+	case ModeCut:
+		if stage == StageSetP1 {
+			return "Place tangent handle at cut point  (right-click cancels)"
+		}
+		return "Click a spline to cut it"
+	case ModeSpeedLimit:
+		return "Left click: apply speed limit   Right click: remove"
+	case ModePreference:
+		return "Left click: assign 1 (reset counter)   Right click on empty: next number   Right click on assigned: remove"
+	}
+	return ""
 }
 
 func drawHud(mode EditorMode, stage Stage, draft Draft, hoveredSpline int, routeStartSplineID int, coupleModeFirstID int, debugMode bool, zoom float32, splineCount, routeCount, carCount int) {
-	panel := rl.NewColor(248, 248, 250, 240)
-	outline := rl.NewColor(210, 210, 215, 255)
-	text := rl.NewColor(30, 30, 35, 255)
-	muted := rl.NewColor(90, 90, 100, 255)
+	mouse := rl.GetMousePosition()
 
-	rl.DrawRectangle(12, 12, 980, 156, panel)
-	rl.DrawRectangleLines(12, 12, 980, 156, outline)
+	bgNormal  := rl.NewColor(245, 245, 248, 245)
+	bgActive  := rl.NewColor(47, 96, 198, 255)
+	bgHover   := rl.NewColor(218, 224, 238, 245)
+	outNormal := rl.NewColor(200, 200, 206, 255)
+	outActive := rl.NewColor(28, 62, 155, 255)
+	txtDark   := rl.NewColor(28, 28, 33, 255)
+	txtMuted  := rl.NewColor(100, 100, 110, 255)
 
-	modeText := "Edit splines"
-	statusText := stageLabel(stage, draft)
-	switch mode {
-	case ModeRoute:
-		modeText = "Route mode"
-		if routeStartSplineID >= 0 {
-			statusText = fmt.Sprintf("Pick a destination end for start spline #%d", routeStartSplineID)
-		} else {
-			statusText = "Pick a route origin on a spline start"
+	for i, item := range toolbarItems {
+		r := toolbarBtnRect(i)
+		isActive := (!item.isDbg && item.mode == mode) || (item.isDbg && debugMode)
+		isHovered := rl.CheckCollisionPointRec(mouse, r)
+
+		bg, out, fg := bgNormal, outNormal, txtDark
+		if isActive {
+			bg, out, fg = bgActive, outActive, rl.White
+		} else if isHovered {
+			bg, out, fg = bgHover, outNormal, txtDark
 		}
-	case ModePriority:
-		modeText = "Priority paint"
-		statusText = "Left click marks hovered spline as priority, right click clears it"
-	case ModeCouple:
-		modeText = "Lane coupling"
-		if coupleModeFirstID >= 0 {
-			statusText = fmt.Sprintf("Click a second spline to couple/uncouple with spline #%d (right-click cancels)", coupleModeFirstID)
-		} else {
-			statusText = "Click a spline to select it as the first lane"
-		}
-	case ModeCut:
-		modeText = "Cut spline"
-		if stage == StageSetP1 {
-			statusText = "Place the tangent handle at the cut point (right-click cancels)"
-		} else {
-			statusText = "Click on a spline to set the cut point"
-		}
-	case ModeSpeedLimit:
-		modeText = "Speed limits"
-		statusText = "Left click applies selected speed limit, right click removes it"
-	case ModePreference:
-		modeText = "Lane preference"
-		statusText = "Left click assigns next preference number, right click removes it"
+
+		rl.DrawRectangleRec(r, bg)
+		rl.DrawRectangleLinesEx(r, 1, out)
+
+		// Key letter — big, centred
+		keyW := measureText(item.key, 36)
+		drawText(item.key, int32(r.X)+int32(r.Width)/2-keyW/2, int32(r.Y)+10, 36, fg)
+
+		// Mode label — small, centred near bottom
+		lblW := measureText(item.label, 13)
+		drawText(item.label, int32(r.X)+int32(r.Width)/2-lblW/2, int32(r.Y)+int32(r.Height)-18, 13, fg)
 	}
 
-	hoverText := "none"
-	if hoveredSpline >= 0 {
-		hoverText = fmt.Sprintf("#%d", hoveredSpline)
-	}
-	debugText := "off"
-	if debugMode {
-		debugText = "on"
-	}
+	// Status text below toolbar
+	status := modeStatusText(mode, stage, draft, routeStartSplineID, coupleModeFirstID)
+	drawText(status, int32(toolbarX), int32(toolbarY+toolbarBtnH+7), 13, txtMuted)
 
-	rl.DrawText("Traffic spline editor", 24, 24, 22, text)
-	rl.DrawText("E: edit | R: route | P: priority | L: lane couple | C: cut | S: speed limits | V: preference | D: debug | Ctrl+S: save | Ctrl+O: open | Tab: cycle", 24, 54, 18, muted)
-	rl.DrawText("Priority splines are purple. Lane coupling: left-click = hard (routing+LC, blue), right-click = soft (LC only, purple). Debug draws blame/LC lines.", 24, 78, 18, muted)
-	rl.DrawText(fmt.Sprintf("Mode: %s   Status: %s", modeText, statusText), 24, 108, 18, text)
-	rl.DrawText(fmt.Sprintf("Splines: %d   Routes: %d   Cars: %d   Hovered: %s   Debug: %s   Zoom: %.2fx   Scale: 1 unit = 1 m", splineCount, routeCount, carCount, hoverText, debugText, zoom), 24, 132, 18, text)
+	// Stats — top right
+	stats := fmt.Sprintf("Splines: %d   Routes: %d   Cars: %d   Zoom: %.1f×", splineCount, routeCount, carCount, zoom)
+	statsW := measureText(stats, 13)
+	drawText(stats, int32(rl.GetScreenWidth())-statsW-12, 14, 13, txtMuted)
 }
 
 func stageLabel(stage Stage, draft Draft) string {
@@ -2773,17 +2868,26 @@ func cacheSpline(s *Spline) {
 }
 
 // buildCurveSpeedProfile computes the maximum speed at every curveSpeedIntervalM
-// metres along the spline. Speed is derived from the local radius of curvature
-// (circumradius of three consecutive sample points) and maxLateralAccelMPS2.
+// metres along the spline. Speed is derived from local curvature and capped by
+// the spline's SpeedLimitKmh (if set), so anticipatory braking applies to speed
+// limits the same way it applies to curves.
 func buildCurveSpeedProfile(s *Spline) []float32 {
 	if s.Length <= 0 {
 		return nil
+	}
+	limitMPS := float32(math.MaxFloat32)
+	if s.SpeedLimitKmh > 0 {
+		limitMPS = s.SpeedLimitKmh / 3.6
 	}
 	count := int(s.Length/curveSpeedIntervalM) + 1
 	profile := make([]float32, count)
 	for i := range profile {
 		d := float32(i) * curveSpeedIntervalM
-		profile[i] = curveSpeedAtArcLen(s, d)
+		v := curveSpeedAtArcLen(s, d)
+		if v > limitMPS {
+			v = limitMPS
+		}
+		profile[i] = v
 	}
 	return profile
 }
@@ -3000,12 +3104,12 @@ func drawSegmentLabel(from, to rl.Vector2, camera rl.Camera2D) {
 	}
 
 	text := fmt.Sprintf("%.1f m  %.0f°", length, angle)
-	tw := int32(len(text)*8 + 10)
+	tw := measureText(text, 14) + 6
 	tx := int32(mid.X+ox) - tw/2
 	ty := int32(mid.Y+oy) - 9
 
 	rl.DrawRectangle(tx-2, ty-2, tw+4, 20, rl.NewColor(30, 30, 35, 180))
-	rl.DrawText(text, tx+3, ty+1, 14, rl.White)
+	drawText(text, tx+3, ty+1, 14, rl.White)
 }
 
 // drawArcLabel draws the arc length at the midpoint of the preview spline.
@@ -3023,12 +3127,12 @@ func drawArcLabel(preview Spline, camera rl.Camera2D) {
 	oy := py * 16
 
 	text := fmt.Sprintf("arc %.1f m", preview.Length*metersPerUnit)
-	tw := int32(len(text)*8 + 10)
+	tw := measureText(text, 14) + 6
 	tx := int32(screen.X+ox) - tw/2
 	ty := int32(screen.Y+oy) - 9
 
 	rl.DrawRectangle(tx-2, ty-2, tw+4, 20, rl.NewColor(20, 80, 160, 200))
-	rl.DrawText(text, tx+3, ty+1, 14, rl.NewColor(180, 220, 255, 255))
+	drawText(text, tx+3, ty+1, 14, rl.NewColor(180, 220, 255, 255))
 }
 
 // drawDraftInfo draws measurement labels directly on the draft segments and arc.
@@ -3060,30 +3164,42 @@ func mapBoolColor(condition bool, whenTrue, whenFalse rl.Color) rl.Color {
 func drawGrid(camera rl.Camera2D) {
 	topLeft := rl.GetScreenToWorld2D(rl.NewVector2(0, 0), camera)
 	bottomRight := rl.GetScreenToWorld2D(rl.NewVector2(float32(rl.GetScreenWidth()), float32(rl.GetScreenHeight())), camera)
-
 	minX := minf(topLeft.X, bottomRight.X)
 	maxX := maxf(topLeft.X, bottomRight.X)
 	minY := minf(topLeft.Y, bottomRight.Y)
 	maxY := maxf(topLeft.Y, bottomRight.Y)
+	zoom := camera.Zoom
 
-	major := chooseGridSpacing(camera.Zoom)
-	minor := major / 5
-
-	minorColor := rl.NewColor(236, 236, 239, 255)
-	majorColor := rl.NewColor(212, 212, 218, 255)
-
-	for x := float32(math.Floor(float64(minX/minor))) * minor; x <= maxX; x += minor {
-		rl.DrawLineV(rl.NewVector2(x, minY), rl.NewVector2(x, maxY), minorColor)
-	}
-	for y := float32(math.Floor(float64(minY/minor))) * minor; y <= maxY; y += minor {
-		rl.DrawLineV(rl.NewVector2(minX, y), rl.NewVector2(maxX, y), minorColor)
+	type level struct {
+		spacing  float32
+		color    rl.Color
+		pxThick  float32 // constant screen-pixel thickness
+		showMin  float32 // only show when zoom >= showMin (0 = no minimum)
+		showMax  float32 // only show when zoom <= showMax (0 = no maximum)
 	}
 
-	for x := float32(math.Floor(float64(minX/major))) * major; x <= maxX; x += major {
-		rl.DrawLineV(rl.NewVector2(x, minY), rl.NewVector2(x, maxY), majorColor)
+	// Draw thinnest first so thicker lines paint on top.
+	levels := []level{
+		{4, rl.NewColor(220, 220, 226, 255), 1.0, 6.0, 0},
+		{20, rl.NewColor(185, 185, 196, 255), 1.5, 0.8, 0},
+		{100, rl.NewColor(148, 148, 162, 255), 2.0, 0, 0},
 	}
-	for y := float32(math.Floor(float64(minY/major))) * major; y <= maxY; y += major {
-		rl.DrawLineV(rl.NewVector2(minX, y), rl.NewVector2(maxX, y), majorColor)
+
+	for _, lvl := range levels {
+		if lvl.showMin > 0 && zoom < lvl.showMin {
+			continue
+		}
+		if lvl.showMax > 0 && zoom > lvl.showMax {
+			continue
+		}
+		thick := pixelsToWorld(zoom, lvl.pxThick)
+		sp := lvl.spacing
+		for x := float32(math.Floor(float64(minX/sp))) * sp; x <= maxX; x += sp {
+			rl.DrawLineEx(rl.NewVector2(x, minY), rl.NewVector2(x, maxY), thick, lvl.color)
+		}
+		for y := float32(math.Floor(float64(minY/sp))) * sp; y <= maxY; y += sp {
+			rl.DrawLineEx(rl.NewVector2(minX, y), rl.NewVector2(maxX, y), thick, lvl.color)
+		}
 	}
 }
 
@@ -3131,8 +3247,8 @@ func drawScaleBar(zoom float32) {
 	rl.DrawLineEx(rl.NewVector2(barX, barY-5), rl.NewVector2(barX, barY+5), 2, barColor)
 	rl.DrawLineEx(rl.NewVector2(barX+barPx, barY-5), rl.NewVector2(barX+barPx, barY+5), 2, barColor)
 
-	labelW := int32(len(label) * 8)
-	rl.DrawText(label, int32(barX+barPx/2)-labelW/2, int32(barY-20), 16, barColor)
+	labelW := measureText(label, 16)
+	drawText(label, int32(barX+barPx/2)-labelW/2, int32(barY-20), 16, barColor)
 }
 
 func chooseGridSpacing(zoom float32) float32 {
@@ -3626,6 +3742,9 @@ func loadSplineFile(path string) ([]Spline, []Route, []Car, int, int, error) {
 		spline.SoftCoupledIDs = append([]int(nil), entry.SoftCoupledIDs...)
 		spline.SpeedLimitKmh = entry.SpeedLimitKmh
 		spline.LanePreference = entry.LanePreference
+		if spline.SpeedLimitKmh > 0 {
+			spline.CurveSpeedMPS = buildCurveSpeedProfile(&spline)
+		}
 		loadedSplines = append(loadedSplines, spline)
 		if entry.ID > maxSplineID {
 			maxSplineID = entry.ID
