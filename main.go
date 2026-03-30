@@ -273,9 +273,31 @@ type DebugBlameLink struct {
 }
 
 type SavedSplineFile struct {
-	Splines []SavedSpline `json:"splines"`
-	Routes  []SavedRoute  `json:"routes,omitempty"`
-	Cars    []SavedCar    `json:"cars,omitempty"`
+	Splines       []SavedSpline       `json:"splines"`
+	Routes        []SavedRoute        `json:"routes,omitempty"`
+	Cars          []SavedCar          `json:"cars,omitempty"`
+	TrafficLights []SavedTrafficLight `json:"traffic_lights,omitempty"`
+	TrafficCycles []SavedTrafficCycle `json:"traffic_cycles,omitempty"`
+}
+
+type SavedTrafficLight struct {
+	ID           int     `json:"id"`
+	SplineID     int     `json:"spline_id"`
+	DistOnSpline float32 `json:"dist_on_spline"`
+	WorldPosX    float32 `json:"world_pos_x"`
+	WorldPosY    float32 `json:"world_pos_y"`
+	CycleID      int     `json:"cycle_id"`
+}
+
+type SavedTrafficPhase struct {
+	DurationSecs  float32 `json:"duration_secs"`
+	GreenLightIDs []int   `json:"green_light_ids,omitempty"`
+}
+
+type SavedTrafficCycle struct {
+	ID      int                 `json:"id"`
+	Enabled bool                `json:"enabled"`
+	Phases  []SavedTrafficPhase `json:"phases,omitempty"`
 }
 
 type SavedSpline struct {
@@ -574,10 +596,11 @@ func main() {
 				noticeText = fmt.Sprintf("Save failed: %v", err)
 				noticeTimer = 3.0
 			} else if path != "" {
-				if err := saveSplineFile(splines, routes, cars, path); err != nil {
+				if err := saveSplineFile(splines, routes, cars, trafficLights, trafficCycles, path); err != nil {
 					noticeText = fmt.Sprintf("Save failed: %v", err)
 				} else {
-					noticeText = fmt.Sprintf("Saved %d splines, %d routes, %d cars to %s", len(splines), len(routes), len(cars), path)
+					noticeText = fmt.Sprintf("Saved %d splines, %d routes, %d cars, %d lights to %s",
+						len(splines), len(routes), len(cars), len(trafficLights), path)
 				}
 				noticeTimer = 3.0
 			}
@@ -588,7 +611,8 @@ func main() {
 				noticeText = fmt.Sprintf("Load failed: %v", err)
 				noticeTimer = 3.0
 			} else if path != "" {
-				loadedSplines, loadedRoutes, loadedCars, loadedNextSplineID, loadedNextRouteID, err := loadSplineFile(path)
+				loadedSplines, loadedRoutes, loadedCars, loadedLights, loadedCycles,
+					loadedNextSplineID, loadedNextRouteID, loadedNextLightID, loadedNextCycleID, err := loadSplineFile(path)
 				if err != nil {
 					noticeText = fmt.Sprintf("Load failed: %v", err)
 					noticeTimer = 3.0
@@ -596,6 +620,8 @@ func main() {
 					splines = loadedSplines
 					routes = loadedRoutes
 					cars = loadedCars
+					trafficLights = loadedLights
+					trafficCycles = loadedCycles
 					stage = StageIdle
 					draft = newDraft()
 					cutDraft = newCutDraft()
@@ -603,10 +629,20 @@ func main() {
 					routePanel = RoutePanel{}
 					routeStartSplineID = -1
 					coupleModeFirstID = -1
+					editingCycleID = -1
+					editingLights = false
+					editingPhaseIdx = -1
+					showPhaseIdx = -1
+					activeDurInput = -1
+					durInputStr = ""
+					pendingLights = pendingLights[:0]
 					nextSplineID = loadedNextSplineID
 					nextRouteID = loadedNextRouteID
+					nextLightID = loadedNextLightID
+					nextCycleID = loadedNextCycleID
 					lastPref = maxLoadedPreference(loadedSplines)
-					noticeText = fmt.Sprintf("Loaded %d splines, %d routes, %d cars from %s", len(splines), len(routes), len(cars), path)
+					noticeText = fmt.Sprintf("Loaded %d splines, %d routes, %d cars, %d lights from %s",
+						len(splines), len(routes), len(cars), len(trafficLights), path)
 					noticeTimer = 3.0
 				}
 			}
@@ -801,12 +837,13 @@ func main() {
 						// On/Off toggle
 						if rl.CheckCollisionPointRec(mouseScreen, onOffBtnR) {
 							trafficCycles = trafficToggleCycleEnabled(trafficCycles, editingCycleID)
-							// turning on: clear all editing state
+							// turning on: clear all editing/preview state
 							if !cycleIsOn {
 								editingLights = false
 								editingPhaseIdx = -1
 								activeDurInput = -1
 								durInputStr = ""
+								showPhaseIdx = -1
 							}
 						}
 						// Edit Lights toggle (only when cycle is off)
@@ -827,13 +864,17 @@ func main() {
 						// Per-phase row buttons
 						for pi := 0; pi < phaseCount; pi++ {
 							row := getPhaseRowBtns(pr, pi)
-							// Show button: always active
+							// Show (cycle off) / Skip (cycle on) button: always active
 							if rl.CheckCollisionPointRec(mouseScreen, row.showBtn) {
-								if showPhaseIdx == pi {
-									showPhaseIdx = -1
+								if cycleIsOn {
+									trafficCycles = trafficSkipToPhase(trafficCycles, editingCycleID, pi)
 								} else {
-									showPhaseIdx = pi
-									editingPhaseIdx = -1
+									if showPhaseIdx == pi {
+										showPhaseIdx = -1
+									} else {
+										showPhaseIdx = pi
+										editingPhaseIdx = -1
+									}
 								}
 							}
 							// Editing buttons: only when cycle is off
@@ -1337,6 +1378,23 @@ func trafficToggleCycleEnabled(cycles []TrafficCycle, cycleID int) []TrafficCycl
 	return cycles
 }
 
+// trafficSkipToPhase jumps the cycle immediately to user phase userIdx (effective index 2*userIdx).
+func trafficSkipToPhase(cycles []TrafficCycle, cycleID, userIdx int) []TrafficCycle {
+	for i := range cycles {
+		if cycles[i].ID != cycleID {
+			continue
+		}
+		n := len(cycles[i].Phases)
+		if userIdx < 0 || userIdx >= n {
+			break
+		}
+		cycles[i].PhaseIndex = 2 * userIdx
+		cycles[i].Timer = 0
+		break
+	}
+	return cycles
+}
+
 // ---------- traffic light panel ----------
 
 const trafficPanelW = 300
@@ -1616,13 +1674,17 @@ func drawTrafficCyclePanel(pending []TrafficLight, lights []TrafficLight, cycles
 				drawSmallBtn(row.delBtn,  "Delete", rl.NewColor(200, 60, 60, 255), rl.White)
 			}
 
-			// Show button (always active)
-			showActive := showPhaseIdx == pi
-			showBg := rl.NewColor(130, 80, 180, 255)
-			if showActive {
-				showBg = rl.NewColor(90, 40, 140, 255)
+			// Show (cycle off) / Skip (cycle on) button
+			if cycleOn {
+				drawSmallBtn(row.showBtn, "Skip", rl.NewColor(60, 120, 190, 255), rl.White)
+			} else {
+				showActive := showPhaseIdx == pi
+				showBg := rl.NewColor(130, 80, 180, 255)
+				if showActive {
+					showBg = rl.NewColor(90, 40, 140, 255)
+				}
+				drawSmallBtn(row.showBtn, "Show", showBg, rl.White)
 			}
-			drawSmallBtn(row.showBtn, "Show", showBg, rl.White)
 		}
 	}
 }
@@ -4650,11 +4712,13 @@ func normalizePickedPath(path string, save bool) string {
 	return path
 }
 
-func saveSplineFile(splines []Spline, routes []Route, cars []Car, path string) error {
+func saveSplineFile(splines []Spline, routes []Route, cars []Car, lights []TrafficLight, cycles []TrafficCycle, path string) error {
 	saved := SavedSplineFile{
-		Splines: make([]SavedSpline, 0, len(splines)),
-		Routes:  make([]SavedRoute, 0, len(routes)),
-		Cars:    make([]SavedCar, 0, len(cars)),
+		Splines:       make([]SavedSpline, 0, len(splines)),
+		Routes:        make([]SavedRoute, 0, len(routes)),
+		Cars:          make([]SavedCar, 0, len(cars)),
+		TrafficLights: make([]SavedTrafficLight, 0, len(lights)),
+		TrafficCycles: make([]SavedTrafficCycle, 0, len(cycles)),
 	}
 	for _, spline := range splines {
 		saved.Splines = append(saved.Splines, SavedSpline{
@@ -4694,6 +4758,31 @@ func saveSplineFile(splines []Spline, routes []Route, cars []Car, path string) e
 		})
 	}
 
+	for _, l := range lights {
+		saved.TrafficLights = append(saved.TrafficLights, SavedTrafficLight{
+			ID:           l.ID,
+			SplineID:     l.SplineID,
+			DistOnSpline: l.DistOnSpline,
+			WorldPosX:    l.WorldPos.X,
+			WorldPosY:    l.WorldPos.Y,
+			CycleID:      l.CycleID,
+		})
+	}
+	for _, c := range cycles {
+		phases := make([]SavedTrafficPhase, len(c.Phases))
+		for i, p := range c.Phases {
+			phases[i] = SavedTrafficPhase{
+				DurationSecs:  p.DurationSecs,
+				GreenLightIDs: append([]int(nil), p.GreenLightIDs...),
+			}
+		}
+		saved.TrafficCycles = append(saved.TrafficCycles, SavedTrafficCycle{
+			ID:      c.ID,
+			Enabled: c.Enabled,
+			Phases:  phases,
+		})
+	}
+
 	data, err := json.MarshalIndent(saved, "", "  ")
 	if err != nil {
 		return err
@@ -4701,15 +4790,15 @@ func saveSplineFile(splines []Spline, routes []Route, cars []Car, path string) e
 	return os.WriteFile(path, data, 0644)
 }
 
-func loadSplineFile(path string) ([]Spline, []Route, []Car, int, int, error) {
+func loadSplineFile(path string) ([]Spline, []Route, []Car, []TrafficLight, []TrafficCycle, int, int, int, int, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, nil, nil, 1, 1, err
+		return nil, nil, nil, nil, nil, 1, 1, 1, 1, err
 	}
 
 	var saved SavedSplineFile
 	if err := json.Unmarshal(data, &saved); err != nil {
-		return nil, nil, nil, 1, 1, err
+		return nil, nil, nil, nil, nil, 1, 1, 1, 1, err
 	}
 
 	loadedSplines := make([]Spline, 0, len(saved.Splines))
@@ -4779,7 +4868,58 @@ func loadSplineFile(path string) ([]Spline, []Route, []Car, int, int, error) {
 		loadedCars = append(loadedCars, car)
 	}
 
-	return loadedSplines, loadedRoutes, loadedCars, maxSplineID + 1, maxRouteID + 1, nil
+	loadedLights := make([]TrafficLight, 0, len(saved.TrafficLights))
+	maxLightID := 0
+	for _, entry := range saved.TrafficLights {
+		loadedLights = append(loadedLights, TrafficLight{
+			ID:           entry.ID,
+			SplineID:     entry.SplineID,
+			DistOnSpline: entry.DistOnSpline,
+			WorldPos:     rl.NewVector2(entry.WorldPosX, entry.WorldPosY),
+			CycleID:      entry.CycleID,
+		})
+		if entry.ID > maxLightID {
+			maxLightID = entry.ID
+		}
+	}
+
+	loadedCycles := make([]TrafficCycle, 0, len(saved.TrafficCycles))
+	maxCycleID := 0
+	for _, entry := range saved.TrafficCycles {
+		phases := make([]TrafficPhase, len(entry.Phases))
+		for i, p := range entry.Phases {
+			phases[i] = TrafficPhase{
+				DurationSecs:  p.DurationSecs,
+				GreenLightIDs: append([]int(nil), p.GreenLightIDs...),
+			}
+		}
+		loadedCycles = append(loadedCycles, TrafficCycle{
+			ID:         entry.ID,
+			LightIDs:   nil, // not saved; rebuilt from lights
+			Phases:     phases,
+			Timer:      0,
+			PhaseIndex: 0,
+			Enabled:    entry.Enabled,
+		})
+		if entry.ID > maxCycleID {
+			maxCycleID = entry.ID
+		}
+	}
+	// Rebuild LightIDs from the loaded lights
+	cycleIdx := make(map[int]int, len(loadedCycles))
+	for i, c := range loadedCycles {
+		cycleIdx[c.ID] = i
+	}
+	for _, l := range loadedLights {
+		if l.CycleID >= 0 {
+			if i, ok := cycleIdx[l.CycleID]; ok {
+				loadedCycles[i].LightIDs = append(loadedCycles[i].LightIDs, l.ID)
+			}
+		}
+	}
+
+	return loadedSplines, loadedRoutes, loadedCars, loadedLights, loadedCycles,
+		maxSplineID + 1, maxRouteID + 1, maxLightID + 1, maxCycleID + 1, nil
 }
 
 func isCtrlDown() bool {
