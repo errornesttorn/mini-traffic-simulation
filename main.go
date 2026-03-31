@@ -1044,9 +1044,13 @@ func main() {
 				drawEndpoint(hoveredStart.Point, handleRadius*1.5, rl.NewColor(163, 92, 255, 255))
 			}
 
-			preview, hasPreview := buildPreview(stage, draft, mouseWorld, hoveredStart, splines)
+			previewMouse := mouseWorld
+			if rl.IsKeyDown(rl.KeyLeftControl) || rl.IsKeyDown(rl.KeyRightControl) {
+				previewMouse = snapToGrid(mouseWorld, 4.0)
+			}
+			preview, hasPreview := buildPreview(stage, draft, previewMouse, hoveredStart, splines)
 			if hasPreview {
-				drawDraft(stage, draft, mouseWorld, camera.Zoom)
+				drawDraft(stage, draft, previewMouse, camera.Zoom)
 				drawSpline(preview, pixelsToWorld(camera.Zoom, 4), rl.NewColor(214, 76, 76, 255))
 			}
 		}
@@ -1083,8 +1087,12 @@ func main() {
 
 		drawScaleBar(camera.Zoom)
 		if mode == ModeEdit {
-			if preview, hasPreview := buildPreview(stage, draft, mouseWorld, hoveredStart, splines); hasPreview {
-				drawDraftInfo(stage, draft, mouseWorld, preview, camera)
+			previewMouse := mouseWorld
+			if rl.IsKeyDown(rl.KeyLeftControl) || rl.IsKeyDown(rl.KeyRightControl) {
+				previewMouse = snapToGrid(mouseWorld, 4.0)
+			}
+			if preview, hasPreview := buildPreview(stage, draft, previewMouse, hoveredStart, splines); hasPreview {
+				drawDraftInfo(stage, draft, previewMouse, preview, camera)
 			}
 		}
 		if mode == ModeSpeedLimit {
@@ -1114,8 +1122,19 @@ func main() {
 	}
 }
 
+func snapToGrid(v rl.Vector2, gridSize float32) rl.Vector2 {
+	return rl.Vector2{
+		X: float32(math.Round(float64(v.X)/float64(gridSize))) * gridSize,
+		Y: float32(math.Round(float64(v.Y)/float64(gridSize))) * gridSize,
+	}
+}
+
 func handleEditMode(stage Stage, draft Draft, splines []Spline, hoveredSpline int, hoveredEnd EndHit, hoveredStart EndHit, mouseWorld rl.Vector2, nextSplineID int) (Stage, Draft, []Spline, int, bool) {
 	topologyChanged := false
+
+	if rl.IsKeyDown(rl.KeyLeftControl) || rl.IsKeyDown(rl.KeyRightControl) {
+		mouseWorld = snapToGrid(mouseWorld, 4.0)
+	}
 
 	if rl.IsMouseButtonPressed(rl.MouseButtonRight) {
 		switch stage {
