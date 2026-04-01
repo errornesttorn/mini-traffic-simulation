@@ -3375,10 +3375,10 @@ func spawnBlocked(candidate Car, cars []Car, splines []Spline) bool {
 func spawnCar(route Route, splines []Spline) Car {
 	// All values in SI units: metres, m/s, m/s².
 	// Typical passenger car: 4.0-4.8 m long, 1.8-2.0 m wide.
-	// Speed range: ~50-130 km/h = 13.9-36.1 m/s.
+	// Speed range: ~80-130 km/h = 22.2-36.1 m/s.
 	// Acceleration: 2.5-4.5 m/s² (comfortable urban driving).
 	length := randRange(4.0, 4.8) / metersPerUnit
-	if rand.Float32() < 0.10 {
+	if rand.Float32() < 0.25 {
 		length *= 2
 	}
 	car := Car{
@@ -3407,8 +3407,8 @@ func spawnCar(route Route, splines []Spline) Car {
 		frontPos, tangent := sampleSplineAtDistance(spline, 0)
 		car.RearPosition = vecSub(frontPos, vecScale(tangent, car.Length*wheelbaseFrac))
 
-		// 10% chance of spawning with a cargo trailer.
-		if rand.Float32() < 0.10 {
+		// 20% chance of spawning with a cargo trailer.
+		if rand.Float32() < 0.20 {
 			tLen := randRange(7.0, 10.0)
 			tWid := randRange(2.0, 2.4)
 			// Trailer rear pivot starts behind the cab's rear pivot by the trailer wheelbase.
@@ -3671,11 +3671,12 @@ func predictCarTrajectory(car Car, graph *RoadGraph, horizon, step float32) []Tr
 		// Advance lateral offset toward curvature-compensation target.
 		κ := signedCurvatureAtArcLen(&spline, simCar.DistanceOnSpline)
 		wb := simCar.Length * wheelbaseFrac
-		targetOffset := κ * wb * wb / 4
+		targetOffset := κ * wb * wb / 6
 		if simCar.Trailer.HasTrailer {
-			targetOffset = κ * wb * wb / 2
+			trailerWb := simCar.Trailer.Length * wheelbaseFrac
+			targetOffset = κ * (wb*wb + trailerWb*trailerWb) / 6
 		}
-		lerpRate := speed / (wb + 0.01)
+		lerpRate := speed / (2 * (wb + 0.01))
 		simCar.LateralOffset += (targetOffset - simCar.LateralOffset) * clampf(lerpRate*step, 0, 1)
 		rightNormal := rl.Vector2{X: splineTangent.Y, Y: -splineTangent.X}
 		frontPos := vecAdd(splinePos, vecScale(rightNormal, simCar.LateralOffset))
@@ -4236,11 +4237,12 @@ func updateCars(cars []Car, routes []Route, graph *RoadGraph, brakingDecisions [
 				// centre stays over the spline as the rear cuts the inside of the bend.
 				κ := signedCurvatureAtArcLen(&currentSpline, car.DistanceOnSpline)
 				wb := car.Length * wheelbaseFrac
-				targetOffset := κ * wb * wb / 4
+				targetOffset := κ * wb * wb / 6
 				if car.Trailer.HasTrailer {
-					targetOffset = κ * wb * wb / 2
+					trailerWb := car.Trailer.Length * wheelbaseFrac
+					targetOffset = κ * (wb*wb + trailerWb*trailerWb) / 6
 				}
-				lerpRate := car.Speed / (wb + 0.01) // converge in ~wheelbase/speed s; zero at standstill
+				lerpRate := car.Speed / (2 * (wb + 0.01)) // converge in ~2*wheelbase/speed s; zero at standstill
 				car.LateralOffset += (targetOffset - car.LateralOffset) * clampf(lerpRate*dt, 0, 1)
 
 				// Pull cab rear pivot toward the offset front pivot.
