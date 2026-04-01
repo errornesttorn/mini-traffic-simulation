@@ -232,6 +232,17 @@ type RoutePanel struct {
 	DraggingSlider bool
 }
 
+// Trailer is an optional cargo trailer towed by a Car.
+// Its front hitch is rigidly the cab's RearPosition; its own RearPosition is
+// pulled toward the hitch each tick, exactly mirroring the cab's rear-pull logic.
+type Trailer struct {
+	HasTrailer   bool
+	Length       float32
+	Width        float32
+	Color        rl.Color
+	RearPosition rl.Vector2 // trailer rear axle, world space
+}
+
 type Car struct {
 	RouteID int
 
@@ -263,6 +274,8 @@ type Car struct {
 	PreferenceCooldown float32 // seconds until the next preference-based lane-change check
 	SlowedTimer        float32 // seconds the car has been held back by a leader
 	OvertakeCooldown   float32 // seconds until the next overtake attempt is allowed
+
+	Trailer Trailer
 }
 
 type TrajectorySample struct {
@@ -271,6 +284,10 @@ type TrajectorySample struct {
 	Heading  rl.Vector2
 	Priority bool
 	SplineID int
+	// Trailer fields (zero value = no trailer).
+	HasTrailer      bool
+	TrailerPosition rl.Vector2
+	TrailerHeading  rl.Vector2
 }
 
 type CollisionPrediction struct {
@@ -3384,6 +3401,22 @@ func spawnCar(route Route, splines []Spline) Car {
 	if spline, ok := findSplineByID(splines, route.StartSplineID); ok {
 		frontPos, tangent := sampleSplineAtDistance(spline, 0)
 		car.RearPosition = vecSub(frontPos, vecScale(tangent, car.Length*wheelbaseFrac))
+
+		// 10% chance of spawning with a cargo trailer.
+		if rand.Float32() < 0.10 {
+			tLen := randRange(7.0, 10.0)
+			tWid := randRange(2.0, 2.4)
+			// Trailer rear pivot starts behind the cab's rear pivot by the trailer wheelbase.
+			trailerRear := vecSub(car.RearPosition, vecScale(tangent, tLen*wheelbaseFrac))
+			r, g, b := car.Color.R, car.Color.G, car.Color.B
+			car.Trailer = Trailer{
+				HasTrailer:   true,
+				Length:       tLen,
+				Width:        tWid,
+				Color:        rl.NewColor(r/2+20, g/2+20, b/2+20, 255),
+				RearPosition: trailerRear,
+			}
+		}
 	}
 	return car
 }
@@ -3413,8 +3446,12 @@ func computeBrakingDecisions(cars []Car, graph *RoadGraph) ([]bool, []bool, []De
 			pos, heading := sampleSplineAtDistance(spline, car.DistanceOnSpline)
 			poses[i] = carPose{pos: pos, heading: heading}
 		}
+		physicalSize := maxf(car.Length, car.Width)
+		if car.Trailer.HasTrailer {
+			physicalSize = car.Length + car.Trailer.Length
+		}
 		reach[i] = maxf(car.Speed, 0)*predictionHorizonSeconds + 0.5*car.Accel*predictionHorizonSeconds*predictionHorizonSeconds +
-			maxf(car.Length, car.Width) + collisionBroadPhaseSlackM
+			physicalSize + collisionBroadPhaseSlackM
 		predictions[i] = predictCarTrajectory(car, graph, predictionHorizonSeconds, predictionStepSeconds)
 	}
 
@@ -3616,6 +3653,7 @@ func predictCarTrajectory(car Car, graph *RoadGraph, horizon, step float32) []Tr
 	samples := make([]TrajectorySample, 0, steps+1)
 	simCar := car
 	simRearPos := car.RearPosition
+	simTrailerRearPos := car.Trailer.RearPosition
 	speed := maxf(car.Speed, 0)
 	active := true
 
@@ -3634,13 +3672,32 @@ func predictCarTrajectory(car Car, graph *RoadGraph, horizon, step float32) []Tr
 		}
 		center := vecScale(vecAdd(frontPos, simRearPos), 0.5)
 		bodyHeading := normalize(vecSub(frontPos, simRearPos))
-		samples = append(samples, TrajectorySample{
+
+		sample := TrajectorySample{
 			Time:     float32(stepIndex) * step,
 			Position: center,
 			Heading:  bodyHeading,
 			Priority: spline.Priority,
 			SplineID: spline.ID,
-		})
+		}
+
+		// Pull trailer rear pivot toward hitch (cab rear pivot), populate sample.
+		if simCar.Trailer.HasTrailer {
+			hitchPos := simRearPos
+			trailerRearToHitch := vecSub(hitchPos, simTrailerRearPos)
+			if vectorLengthSq(trailerRearToHitch) > 1e-9 {
+				simTrailerRearPos = vecSub(hitchPos, vecScale(normalize(trailerRearToHitch), simCar.Trailer.Length*wheelbaseFrac))
+			} else {
+				simTrailerRearPos = vecSub(hitchPos, vecScale(splineTangent, simCar.Trailer.Length*wheelbaseFrac))
+			}
+			trailerCenter := vecScale(vecAdd(hitchPos, simTrailerRearPos), 0.5)
+			trailerHeading := normalize(vecSub(hitchPos, simTrailerRearPos))
+			sample.HasTrailer = true
+			sample.TrailerPosition = trailerCenter
+			sample.TrailerHeading = trailerHeading
+		}
+
+		samples = append(samples, sample)
 
 		if !active {
 			break
@@ -3715,17 +3772,46 @@ func predictCollision(aSamples, bSamples []TrajectorySample, carA, carB Car) (Co
 
 	rA := collisionRadius(carA)
 	rB := collisionRadius(carB)
-	circleDist := rA + rB
-	circleDistSq := circleDist * circleDist
 	offsetsA := collisionCircleOffsets(carA)
 	offsetsB := collisionCircleOffsets(carB)
-	// Coarse reject: one bounding circle per car, centered on the vehicle center.
-	// Radius fully contains the current two-circle hitbox, so it can only reject
-	// impossible collisions and never create false negatives.
+
+	// Precompute trailer hitbox data (empty slices/zero radius when no trailer).
+	var rTA, rTB float32
+	var trailerOffsetsA, trailerOffsetsB []float32
+	if carA.Trailer.HasTrailer {
+		rTA = hitboxRadius(carA.Trailer.Width)
+		trailerOffsetsA = hitboxCircleOffsets(carA.Trailer.Length, carA.Trailer.Width)
+	}
+	if carB.Trailer.HasTrailer {
+		rTB = hitboxRadius(carB.Trailer.Width)
+		trailerOffsetsB = hitboxCircleOffsets(carB.Trailer.Length, carB.Trailer.Width)
+	}
+
+	// checkCircleGroups returns true if any circle from group A overlaps any from group B.
+	checkCircleGroups := func(cenA, hA rl.Vector2, offsA []float32, rA float32,
+		cenB, hB rl.Vector2, offsB []float32, rB float32) bool {
+		threshSq := (rA + rB) * (rA + rB)
+		for _, offA := range offsA {
+			cA := vecAdd(cenA, vecScale(hA, offA))
+			for _, offB := range offsB {
+				if distSq(cA, vecAdd(cenB, vecScale(hB, offB))) <= threshSq {
+					return true
+				}
+			}
+		}
+		return false
+	}
+
+	// Coarse reject: bounding circle centred on cab, expanded to cover trailer.
 	coarseRA := carA.Length/2 + 1.0
+	if carA.Trailer.HasTrailer {
+		coarseRA += carA.Trailer.Length + 1.0
+	}
 	coarseRB := carB.Length/2 + 1.0
-	coarseDist := coarseRA + coarseRB
-	coarseDistSq := coarseDist * coarseDist
+	if carB.Trailer.HasTrailer {
+		coarseRB += carB.Trailer.Length + 1.0
+	}
+	coarseDistSq := (coarseRA + coarseRB) * (coarseRA + coarseRB)
 
 	for i := 0; i < count; i++ {
 		pA, hA := aSamples[i].Position, aSamples[i].Heading
@@ -3734,20 +3820,22 @@ func predictCollision(aSamples, bSamples []TrajectorySample, carA, carB Car) (Co
 			continue
 		}
 
-		collides := false
-		for _, offA := range offsetsA {
-			aCircle := vecAdd(pA, vecScale(hA, offA))
-			for _, offB := range offsetsB {
-				bCircle := vecAdd(pB, vecScale(hB, offB))
-				if distSq(aCircle, bCircle) <= circleDistSq {
-					collides = true
-					break
-				}
-			}
-			if collides {
-				break
-			}
+		// Check all four cab/trailer combinations.
+		collides := checkCircleGroups(pA, hA, offsetsA, rA, pB, hB, offsetsB, rB)
+
+		if !collides && aSamples[i].HasTrailer {
+			collides = checkCircleGroups(aSamples[i].TrailerPosition, aSamples[i].TrailerHeading, trailerOffsetsA, rTA,
+				pB, hB, offsetsB, rB)
 		}
+		if !collides && bSamples[i].HasTrailer {
+			collides = checkCircleGroups(pA, hA, offsetsA, rA,
+				bSamples[i].TrailerPosition, bSamples[i].TrailerHeading, trailerOffsetsB, rTB)
+		}
+		if !collides && aSamples[i].HasTrailer && bSamples[i].HasTrailer {
+			collides = checkCircleGroups(aSamples[i].TrailerPosition, aSamples[i].TrailerHeading, trailerOffsetsA, rTA,
+				bSamples[i].TrailerPosition, bSamples[i].TrailerHeading, trailerOffsetsB, rTB)
+		}
+
 		if !collides {
 			continue
 		}
@@ -3981,8 +4069,13 @@ func computeFollowingSpeedCaps(cars []Car, graph *RoadGraph) []float32 {
 			if euclidean > followLookaheadM {
 				continue
 			}
-			// Gap = distance from my front to the leader's rear.
-			rearDiff := vecSub(other.RearPosition, pI)
+			// Gap = distance from my front to the leader's rearmost point
+			// (trailer rear if it has one, cab rear pivot otherwise).
+			leaderRear := other.RearPosition
+			if other.Trailer.HasTrailer {
+				leaderRear = other.Trailer.RearPosition
+			}
+			rearDiff := vecSub(leaderRear, pI)
 			gap := float32(math.Sqrt(float64(rearDiff.X*rearDiff.X + rearDiff.Y*rearDiff.Y)))
 			if gap > desiredGap {
 				continue
@@ -4120,11 +4213,19 @@ func updateCars(cars []Car, routes []Route, graph *RoadGraph, brakingDecisions [
 
 			car.DistanceOnSpline += car.Speed * dt
 			if car.DistanceOnSpline <= currentSpline.Length {
-				// Pull rear pivot toward front pivot, maintaining wheelbase length.
+				// Pull cab rear pivot toward front pivot, maintaining wheelbase length.
 				frontPos, _ := sampleSplineAtDistance(currentSpline, car.DistanceOnSpline)
 				rearToFront := vecSub(frontPos, car.RearPosition)
 				if vectorLengthSq(rearToFront) > 1e-9 {
 					car.RearPosition = vecSub(frontPos, vecScale(normalize(rearToFront), car.Length*wheelbaseFrac))
+				}
+				// Pull trailer rear pivot toward cab rear pivot (hitch), maintaining trailer wheelbase.
+				if car.Trailer.HasTrailer {
+					hitchPos := car.RearPosition
+					trailerRearToHitch := vecSub(hitchPos, car.Trailer.RearPosition)
+					if vectorLengthSq(trailerRearToHitch) > 1e-9 {
+						car.Trailer.RearPosition = vecSub(hitchPos, vecScale(normalize(trailerRearToHitch), car.Trailer.Length*wheelbaseFrac))
+					}
 				}
 				alive = append(alive, car)
 				break
@@ -4199,6 +4300,19 @@ func drawCars(cars []Car, splines []Spline, splineIndexByID map[int]int, zoom fl
 		angle := float32(math.Atan2(float64(bodyHeading.Y), float64(bodyHeading.X)) * 180 / math.Pi)
 		rect := rl.NewRectangle(center.X, center.Y, car.Length, car.Width)
 		origin := rl.NewVector2(car.Length/2, car.Width/2)
+		// Draw trailer first so the cab renders on top at the hitch point.
+		if car.Trailer.HasTrailer {
+			hitchPos := car.RearPosition
+			trailerHeading := normalize(vecSub(hitchPos, car.Trailer.RearPosition))
+			if vectorLengthSq(vecSub(hitchPos, car.Trailer.RearPosition)) <= 1e-9 {
+				trailerHeading = bodyHeading
+			}
+			trailerCenter := vecScale(vecAdd(hitchPos, car.Trailer.RearPosition), 0.5)
+			trailerAngle := float32(math.Atan2(float64(trailerHeading.Y), float64(trailerHeading.X)) * 180 / math.Pi)
+			trailerRect := rl.NewRectangle(trailerCenter.X, trailerCenter.Y, car.Trailer.Length, car.Trailer.Width)
+			trailerOrigin := rl.NewVector2(car.Trailer.Length/2, car.Trailer.Width/2)
+			rl.DrawRectanglePro(trailerRect, trailerOrigin, trailerAngle, car.Trailer.Color)
+		}
 		rl.DrawRectanglePro(rect, origin, angle, car.Color)
 		if car.Braking {
 			rl.DrawCircleV(center, maxf(car.Width*0.22, pixelsToWorld(zoom, 2)), rl.NewColor(220, 50, 50, 255))
@@ -4233,6 +4347,23 @@ func drawCarHitboxes(cars []Car, splines []Spline, splineIndexByID map[int]int) 
 		// Mark front and rear pivots.
 		rl.DrawCircleV(frontPos, r*0.25, pivotColor)
 		rl.DrawCircleV(car.RearPosition, r*0.25, pivotColor)
+
+		if car.Trailer.HasTrailer {
+			hitchPos := car.RearPosition
+			trailerHeading := normalize(vecSub(hitchPos, car.Trailer.RearPosition))
+			if vectorLengthSq(vecSub(hitchPos, car.Trailer.RearPosition)) <= 1e-9 {
+				trailerHeading = bodyHeading
+			}
+			trailerCenter := vecScale(vecAdd(hitchPos, car.Trailer.RearPosition), 0.5)
+			rT := hitboxRadius(car.Trailer.Width)
+			for _, offset := range hitboxCircleOffsets(car.Trailer.Length, car.Trailer.Width) {
+				circlePos := vecAdd(trailerCenter, vecScale(trailerHeading, offset))
+				rl.DrawCircleV(circlePos, rT, fill)
+				rl.DrawCircleLinesV(circlePos, rT, outline)
+			}
+			// Trailer rear pivot (hitch is already marked as cab rear pivot above).
+			rl.DrawCircleV(car.Trailer.RearPosition, rT*0.25, pivotColor)
+		}
 	}
 }
 
@@ -5805,31 +5936,27 @@ func pickNextColorIndex(routes []Route) int {
 	return minIdx
 }
 
-// collisionRadius returns the radius of each hitbox circle.
-// The circles are sized so they protrude exactly 0.5 m beyond the car's sides:
-//
-//	r = W/2 + 0.5
-func collisionRadius(car Car) float32 {
-	return car.Width/2 + 0.5
+// hitboxRadius returns the circle radius for a body of the given width.
+// Circles protrude exactly 0.5 m beyond the body's sides.
+func hitboxRadius(width float32) float32 {
+	return width/2 + 0.5
 }
 
-// collisionCircleOffsets returns circle-centre offsets along the car's heading.
-// Circles are placed from front to rear so that adjacent circle edges have a
-// gap of at most 1 m (they never overlap). The minimum is two circles.
-func collisionCircleOffsets(car Car) []float32 {
-	r := collisionRadius(car)
-	span := 2 * (car.Length/2 + 1.0 - r)
+// hitboxCircleOffsets returns circle-centre offsets along the body heading for
+// an object of the given length and width. Circles are placed so adjacent
+// edges have a gap of at most 1 m and never overlap. Minimum two circles.
+func hitboxCircleOffsets(length, width float32) []float32 {
+	r := hitboxRadius(width)
+	span := 2 * (length/2 + 1.0 - r)
 	if span < 0 {
 		span = 0
 	}
-
 	// Maximum centre-to-centre distance that keeps the edge gap ≤ 1 m.
 	maxSpacing := 2*r + 1.0
 	count := int(math.Ceil(float64(span/maxSpacing))) + 1
 	if count < 2 {
 		count = 2
 	}
-
 	offsets := make([]float32, count)
 	start := -span / 2
 	step := float32(0)
@@ -5841,6 +5968,9 @@ func collisionCircleOffsets(car Car) []float32 {
 	}
 	return offsets
 }
+
+func collisionRadius(car Car) float32        { return hitboxRadius(car.Width) }
+func collisionCircleOffsets(car Car) []float32 { return hitboxCircleOffsets(car.Length, car.Width) }
 
 func headingAngleDegrees(a, b rl.Vector2) float32 {
 	da := normalize(a)
