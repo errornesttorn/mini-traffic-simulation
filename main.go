@@ -160,6 +160,7 @@ type Spline struct {
 	SpeedLimitKmh  float32   // 0 = no limit
 	LanePreference int       // 0 = none; lower = higher preference
 	CurveSpeedMPS  []float32 // max speed at each curveSpeedIntervalM mark along the spline
+	TravelTimeS    float32   // traversal time at spline max speed without congestion
 }
 
 type Draft struct {
@@ -2229,10 +2230,12 @@ func handleSpeedLimitMode(splines []Spline, hoveredSpline, selectedSpeedKmh int)
 	if rl.IsMouseButtonPressed(rl.MouseButtonLeft) {
 		splines[hoveredSpline].SpeedLimitKmh = float32(selectedSpeedKmh)
 		splines[hoveredSpline].CurveSpeedMPS = buildCurveSpeedProfile(&splines[hoveredSpline])
+		splines[hoveredSpline].TravelTimeS = buildSplineTravelTime(&splines[hoveredSpline])
 	}
 	if rl.IsMouseButtonPressed(rl.MouseButtonRight) {
 		splines[hoveredSpline].SpeedLimitKmh = 0
 		splines[hoveredSpline].CurveSpeedMPS = buildCurveSpeedProfile(&splines[hoveredSpline])
+		splines[hoveredSpline].TravelTimeS = buildSplineTravelTime(&splines[hoveredSpline])
 	}
 	return splines
 }
@@ -4476,6 +4479,7 @@ func cacheSpline(s *Spline) {
 	s.Length = total
 	s.SpeedFactor = 1.0
 	s.CurveSpeedMPS = buildCurveSpeedProfile(s)
+	s.TravelTimeS = buildSplineTravelTime(s)
 }
 
 // buildCurveSpeedProfile computes the maximum speed at every curveSpeedIntervalM
@@ -4501,6 +4505,42 @@ func buildCurveSpeedProfile(s *Spline) []float32 {
 		profile[i] = v
 	}
 	return profile
+}
+
+func buildSplineTravelTime(s *Spline) float32 {
+	if s.Length <= 0 {
+		return 0
+	}
+	if len(s.CurveSpeedMPS) == 0 {
+		speed := maxCarSpeed * s.SpeedFactor
+		if speed <= 1e-3 {
+			return float32(math.MaxFloat32)
+		}
+		return s.Length / speed
+	}
+
+	totalTime := float32(0)
+	remaining := s.Length
+	for _, fragSpeed := range s.CurveSpeedMPS {
+		if remaining <= 0 {
+			break
+		}
+		fragLen := minf(curveSpeedIntervalM, remaining)
+		speed := fragSpeed * s.SpeedFactor
+		if speed <= 1e-3 {
+			return float32(math.MaxFloat32)
+		}
+		totalTime += fragLen / speed
+		remaining -= fragLen
+	}
+	if remaining > 0 {
+		speed := s.CurveSpeedMPS[len(s.CurveSpeedMPS)-1] * s.SpeedFactor
+		if speed <= 1e-3 {
+			return float32(math.MaxFloat32)
+		}
+		totalTime += remaining / speed
+	}
+	return totalTime
 }
 
 // curveSpeedAtArcLen returns the maximum speed at arc-length d based on local
@@ -5202,7 +5242,7 @@ func buildStartsByNode(splines []Spline) map[string][]int {
 }
 
 func segmentTravelCost(s Spline, vehicleCounts map[int]int) float32 {
-	return s.Length * float32(1+vehicleCounts[s.ID])
+	return s.TravelTimeS + float32(vehicleCounts[s.ID])*2.0
 }
 
 func sampleSplineAtDistance(s Spline, distance float32) (rl.Vector2, rl.Vector2) {
@@ -5483,9 +5523,8 @@ func loadSplineFile(path string) ([]Spline, []Route, []Car, []TrafficLight, []Tr
 		spline.SoftCoupledIDs = append([]int(nil), entry.SoftCoupledIDs...)
 		spline.SpeedLimitKmh = entry.SpeedLimitKmh
 		spline.LanePreference = entry.LanePreference
-		if spline.SpeedLimitKmh > 0 {
-			spline.CurveSpeedMPS = buildCurveSpeedProfile(&spline)
-		}
+		spline.CurveSpeedMPS = buildCurveSpeedProfile(&spline)
+		spline.TravelTimeS = buildSplineTravelTime(&spline)
 		loadedSplines = append(loadedSplines, spline)
 		if entry.ID > maxSplineID {
 			maxSplineID = entry.ID
