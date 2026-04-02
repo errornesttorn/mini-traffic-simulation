@@ -3531,6 +3531,51 @@ func computeBrakingDecisions(cars []Car, graph *RoadGraph) ([]bool, []bool, []De
 		}
 	}
 
+	// Deadlock detection: break blame cycles of up to 4 hops by releasing
+	// the car with the smallest index in each cycle.
+	{
+		yieldTo := make([]int, len(cars))
+		for k := range yieldTo {
+			yieldTo[k] = -1
+		}
+		for _, link := range tentativeLinks {
+			if yieldTo[link.FromCarIndex] == -1 {
+				yieldTo[link.FromCarIndex] = link.ToCarIndex
+			}
+		}
+		for i := range cars {
+			if yieldTo[i] < 0 || !initialBlame[i] {
+				continue
+			}
+			var chain [4]int
+			chainLen := 0
+			cur := i
+			cycleFound := false
+			for hop := 0; hop < 4; hop++ {
+				chain[hop] = cur
+				chainLen = hop + 1
+				next := yieldTo[cur]
+				if next < 0 {
+					break
+				}
+				if next == i {
+					cycleFound = true
+					break
+				}
+				cur = next
+			}
+			if cycleFound {
+				minIdx := chain[0]
+				for k := 1; k < chainLen; k++ {
+					if chain[k] < minIdx {
+						minIdx = chain[k]
+					}
+				}
+				initialBlame[minIdx] = false
+			}
+		}
+	}
+
 	for i := range cars {
 		if !initialBlame[i] {
 			continue
@@ -3893,6 +3938,9 @@ func predictCollision(aSamples, bSamples []TrajectorySample, carA, carB Car) (Co
 
 func determineBlame(collision CollisionPrediction, carA, carB Car, splines []Spline) (bool, bool) {
 	if collision.AlreadyCollided {
+		if headingAngleDegrees(collision.HeadingA, collision.HeadingB) >= 60 {
+			return false, false
+		}
 		return blameRearCar(collision, carA, carB)
 	}
 	if collision.PriorityA != collision.PriorityB {
