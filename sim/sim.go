@@ -1056,6 +1056,7 @@ func spawnBlocked(candidate Car, cars []Car, splines []Spline) bool {
 }
 
 func spawnVehicle(route Route, splines []Spline) Car {
+	hasTrailer := route.VehicleKind == VehicleCar && rand.Float32() < 0.10
 	length := randRange(4.0, 4.8) / metersPerUnit
 	width := randRange(1.8, 2.0) / metersPerUnit
 	maxSpeed := randRange(22.2, 36.1)
@@ -1067,6 +1068,12 @@ func spawnVehicle(route Route, splines []Spline) Car {
 		maxSpeed = randRange(13.9, 20.0)
 		accel = randRange(1.2, 2.0)
 		curveSpeedMultiplier = randRange(0.9, 1.05)
+	} else if hasTrailer {
+		length = randRange(5.8, 7.0) / metersPerUnit
+		width = randRange(2.35, 2.55) / metersPerUnit
+		maxSpeed = randRange(18.0, 25.0)
+		accel = randRange(1.0, 1.8)
+		curveSpeedMultiplier = randRange(0.85, 1.0)
 	}
 
 	car := Car{
@@ -1094,9 +1101,9 @@ func spawnVehicle(route Route, splines []Spline) Car {
 		frontPos, tangent := sampleSplineAtDistance(spline, 0)
 		car.RearPosition = vecSub(frontPos, vecScale(tangent, car.Length*wheelbaseFrac))
 
-		if route.VehicleKind == VehicleCar && rand.Float32() < 0.20 {
-			tLen := randRange(7.0, 10.0)
-			tWid := randRange(2.0, 2.4)
+		if hasTrailer {
+			tLen := randRange(11.0, 13.6)
+			tWid := randRange(2.35, 2.55)
 			trailerRear := vecSub(car.RearPosition, vecScale(tangent, tLen*wheelbaseFrac))
 			r, g, b := car.Color.R, car.Color.G, car.Color.B
 			car.Trailer = Trailer{
