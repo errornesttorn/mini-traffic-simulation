@@ -54,6 +54,7 @@ import (
 // Navigation intentionally has no pan. To move around, zoom out and then zoom back into a new point.
 
 type EditorMode int
+type EditorTool int
 
 type Stage int
 
@@ -62,15 +63,24 @@ type EndKind int
 type VehicleKind = simpkg.VehicleKind
 
 const (
-	ModeEdit EditorMode = iota
+	ModeDraw EditorMode = iota
+	ModeRules
 	ModeRoute
-	ModeBus
-	ModePriority
-	ModeCouple
-	ModeCut
-	ModeSpeedLimit
-	ModePreference
-	ModeTrafficLight
+	ModeTraffic
+)
+
+const (
+	ToolSpline EditorTool = iota
+	ToolQuadratic
+	ToolCut
+	ToolReverse
+	ToolPriority
+	ToolCouple
+	ToolSpeedLimit
+	ToolPreference
+	ToolRouteCars
+	ToolRouteBuses
+	ToolTrafficLight
 )
 
 const (
@@ -244,12 +254,29 @@ type Draft struct {
 	P0 Vec2
 	P1 Vec2
 	P2 Vec2
+	P3 Vec2
 
 	HasP1 bool
 	HasP2 bool
 
 	LockP1           bool
 	ContinuationFrom int
+	P1AxisDir        Vec2
+	SnapP3           bool
+	P2AxisDir        Vec2
+}
+
+type QuadraticDraft struct {
+	P0 Vec2
+	M  Vec2
+	P3 Vec2
+
+	FromPrevAxis      bool
+	PrevAxisDir       Vec2
+	MMirroredFromPrev bool
+
+	SnapP3      bool
+	NextAxisDir Vec2
 }
 
 // CutDraft holds state for the spline-cut mode.
@@ -270,6 +297,10 @@ type EndHit struct {
 	SplineID    int
 	Kind        EndKind
 	Point       Vec2
+}
+
+type DirectionWarning struct {
+	Point Vec2
 }
 
 type BusStop = simpkg.BusStop
@@ -378,28 +409,50 @@ type TrafficCycle = simpkg.TrafficCycle
 // uiFont is the Ubuntu font used for all on-screen text.
 var uiFont rl.Font
 
-// toolbarItem describes one button in the mode toolbar.
-type toolbarItem struct {
+type modeToolbarItem struct {
 	key      string
 	label    string
 	mode     EditorMode
-	isDbg    bool // true for the debug toggle button
-	isHitbox bool // true for the hitbox debug toggle button
+	isDbg    bool
+	isHitbox bool
 }
 
-// toolbarItems is the ordered list of toolbar buttons.
-var toolbarItems = []toolbarItem{
-	{"E", "Edit", ModeEdit, false, false},
-	{"R", "Route", ModeRoute, false, false},
-	{"B", "Bus", ModeBus, false, false},
-	{"P", "Priority", ModePriority, false, false},
-	{"L", "Couple", ModeCouple, false, false},
-	{"C", "Cut", ModeCut, false, false},
-	{"S", "Speed", ModeSpeedLimit, false, false},
-	{"V", "Prefer", ModePreference, false, false},
-	{"T", "Traffic", ModeTrafficLight, false, false},
+type toolToolbarItem struct {
+	key   string
+	label string
+	tool  EditorTool
+}
+
+var modeToolbarItems = []modeToolbarItem{
+	{"Dw", "Draw", ModeDraw, false, false},
+	{"Ru", "Rules", ModeRules, false, false},
+	{"Rt", "Route", ModeRoute, false, false},
+	{"Tr", "Traffic", ModeTraffic, false, false},
 	{"D", "Debug", 0, true, false},
 	{"H", "Hitbox", 0, false, true},
+}
+
+var drawToolItems = []toolToolbarItem{
+	{"E", "Spline", ToolSpline},
+	{"Q", "Quad", ToolQuadratic},
+	{"C", "Cut", ToolCut},
+	{"X", "Rev", ToolReverse},
+}
+
+var rulesToolItems = []toolToolbarItem{
+	{"P", "Priority", ToolPriority},
+	{"L", "Couple", ToolCouple},
+	{"S", "Speed", ToolSpeedLimit},
+	{"V", "Prefer", ToolPreference},
+}
+
+var routeToolItems = []toolToolbarItem{
+	{"R", "Cars", ToolRouteCars},
+	{"B", "Buses", ToolRouteBuses},
+}
+
+var trafficToolItems = []toolToolbarItem{
+	{"T", "Traffic", ToolTrafficLight},
 }
 
 const (
@@ -415,11 +468,73 @@ func toolbarBtnRect(i int) rl.Rectangle {
 	return rl.NewRectangle(x, float32(toolbarY), toolbarBtnW, toolbarBtnH)
 }
 
+func toolBtnRect(i int) rl.Rectangle {
+	x := float32(toolbarX) + float32(i)*(toolbarBtnW+toolbarBtnGap)
+	y := float32(toolbarY + toolbarBtnH + toolbarBtnGap)
+	return rl.NewRectangle(x, y, toolbarBtnW, toolbarBtnH)
+}
+
+func toolsForMode(mode EditorMode) []toolToolbarItem {
+	switch mode {
+	case ModeDraw:
+		return drawToolItems
+	case ModeRules:
+		return rulesToolItems
+	case ModeRoute:
+		return routeToolItems
+	case ModeTraffic:
+		return trafficToolItems
+	default:
+		return nil
+	}
+}
+
+func modeForTool(tool EditorTool) EditorMode {
+	switch tool {
+	case ToolSpline, ToolQuadratic, ToolCut, ToolReverse:
+		return ModeDraw
+	case ToolPriority, ToolCouple, ToolSpeedLimit, ToolPreference:
+		return ModeRules
+	case ToolRouteCars, ToolRouteBuses:
+		return ModeRoute
+	case ToolTrafficLight:
+		return ModeTraffic
+	default:
+		return ModeDraw
+	}
+}
+
+func defaultToolForMode(mode EditorMode) EditorTool {
+	switch mode {
+	case ModeDraw:
+		return ToolSpline
+	case ModeRules:
+		return ToolPriority
+	case ModeRoute:
+		return ToolRouteCars
+	case ModeTraffic:
+		return ToolTrafficLight
+	default:
+		return ToolSpline
+	}
+}
+
 func isMouseOverToolbar(mouse Vec2) bool {
-	n := len(toolbarItems)
-	totalW := float32(n*toolbarBtnW + (n-1)*toolbarBtnGap)
-	return mouse.X >= float32(toolbarX) && mouse.X <= float32(toolbarX)+totalW &&
-		mouse.Y >= float32(toolbarY) && mouse.Y <= float32(toolbarY+toolbarBtnH)
+	topN := len(modeToolbarItems)
+	topW := float32(topN*toolbarBtnW + (topN-1)*toolbarBtnGap)
+	if mouse.X >= float32(toolbarX) && mouse.X <= float32(toolbarX)+topW &&
+		mouse.Y >= float32(toolbarY) && mouse.Y <= float32(toolbarY+toolbarBtnH) {
+		return true
+	}
+	toolN := 0
+	for _, mode := range []EditorMode{ModeDraw, ModeRules, ModeRoute, ModeTraffic} {
+		if n := len(toolsForMode(mode)); n > toolN {
+			toolN = n
+		}
+	}
+	maxToolW := float32(toolN*toolbarBtnW + (toolN-1)*toolbarBtnGap)
+	return mouse.X >= float32(toolbarX) && mouse.X <= float32(toolbarX)+maxToolW &&
+		mouse.Y >= float32(toolbarY+toolbarBtnH+toolbarBtnGap) && mouse.Y <= float32(toolbarY+2*toolbarBtnH+toolbarBtnGap)
 }
 
 func drawText(text string, x, y, size int32, color Color) {
@@ -454,9 +569,11 @@ func main() {
 
 	world := simpkg.NewWorld()
 
-	mode := ModeEdit
+	mode := ModeDraw
+	tool := ToolSpline
 	stage := StageIdle
 	draft := newDraft()
+	quadraticDraft := newQuadraticDraft()
 	cutDraft := newCutDraft()
 	routePanel := RoutePanel{}
 	routeStartSplineID := -1
@@ -479,6 +596,28 @@ func main() {
 	noticeText := ""
 	noticeTimer := float32(0)
 
+	resetToolState := func() {
+		stage = StageIdle
+		draft = newDraft()
+		quadraticDraft = newQuadraticDraft()
+		cutDraft = newCutDraft()
+		routePanel = RoutePanel{}
+		routeStartSplineID = -1
+		coupleModeFirstID = -1
+	}
+
+	setTool := func(newTool EditorTool) {
+		tool = newTool
+		mode = modeForTool(newTool)
+		resetToolState()
+	}
+
+	setMode := func(newMode EditorMode) {
+		mode = newMode
+		tool = defaultToolForMode(newMode)
+		resetToolState()
+	}
+
 	for !rl.WindowShouldClose() {
 		frameStart := time.Now()
 		frameProf := frameProfile{}
@@ -496,112 +635,48 @@ func main() {
 
 		if rl.IsKeyPressed(rl.KeyTab) {
 			switch mode {
-			case ModeEdit:
-				mode = ModeRoute
+			case ModeDraw:
+				setMode(ModeRules)
+			case ModeRules:
+				setMode(ModeRoute)
 			case ModeRoute:
-				mode = ModeBus
-			case ModeBus:
-				mode = ModePriority
-			case ModePriority:
-				mode = ModeCouple
-			case ModeCouple:
-				mode = ModeCut
-			case ModeCut:
-				mode = ModeSpeedLimit
-			case ModeSpeedLimit:
-				mode = ModePreference
-			case ModePreference:
-				mode = ModeTrafficLight
+				setMode(ModeTraffic)
 			default:
-				mode = ModeEdit
+				setMode(ModeDraw)
 			}
-			stage = StageIdle
-			draft = newDraft()
-			cutDraft = newCutDraft()
-			routePanel = RoutePanel{}
-			routeStartSplineID = -1
-			coupleModeFirstID = -1
 		}
 		if rl.IsKeyPressed(rl.KeyE) {
-			mode = ModeEdit
-			stage = StageIdle
-			draft = newDraft()
-			cutDraft = newCutDraft()
-			routePanel = RoutePanel{}
-			routeStartSplineID = -1
-			coupleModeFirstID = -1
+			setTool(ToolSpline)
+		}
+		if rl.IsKeyPressed(rl.KeyQ) {
+			setTool(ToolQuadratic)
 		}
 		if rl.IsKeyPressed(rl.KeyR) {
-			mode = ModeRoute
-			stage = StageIdle
-			draft = newDraft()
-			cutDraft = newCutDraft()
-			routePanel = RoutePanel{}
-			routeStartSplineID = -1
-			coupleModeFirstID = -1
+			setTool(ToolRouteCars)
 		}
 		if rl.IsKeyPressed(rl.KeyB) {
-			mode = ModeBus
-			stage = StageIdle
-			draft = newDraft()
-			cutDraft = newCutDraft()
-			routePanel = RoutePanel{}
-			routeStartSplineID = -1
-			coupleModeFirstID = -1
+			setTool(ToolRouteBuses)
 		}
 		if rl.IsKeyPressed(rl.KeyP) {
-			mode = ModePriority
-			stage = StageIdle
-			draft = newDraft()
-			cutDraft = newCutDraft()
-			routePanel = RoutePanel{}
-			routeStartSplineID = -1
-			coupleModeFirstID = -1
+			setTool(ToolPriority)
 		}
 		if rl.IsKeyPressed(rl.KeyL) {
-			mode = ModeCouple
-			stage = StageIdle
-			draft = newDraft()
-			cutDraft = newCutDraft()
-			routePanel = RoutePanel{}
-			routeStartSplineID = -1
-			coupleModeFirstID = -1
+			setTool(ToolCouple)
 		}
 		if rl.IsKeyPressed(rl.KeyC) {
-			mode = ModeCut
-			stage = StageIdle
-			draft = newDraft()
-			cutDraft = newCutDraft()
-			routePanel = RoutePanel{}
-			routeStartSplineID = -1
-			coupleModeFirstID = -1
+			setTool(ToolCut)
+		}
+		if rl.IsKeyPressed(rl.KeyX) {
+			setTool(ToolReverse)
 		}
 		if rl.IsKeyPressed(rl.KeyS) && !isCtrlDown() {
-			mode = ModeSpeedLimit
-			stage = StageIdle
-			draft = newDraft()
-			cutDraft = newCutDraft()
-			routePanel = RoutePanel{}
-			routeStartSplineID = -1
-			coupleModeFirstID = -1
+			setTool(ToolSpeedLimit)
 		}
 		if rl.IsKeyPressed(rl.KeyV) {
-			mode = ModePreference
-			stage = StageIdle
-			draft = newDraft()
-			cutDraft = newCutDraft()
-			routePanel = RoutePanel{}
-			routeStartSplineID = -1
-			coupleModeFirstID = -1
+			setTool(ToolPreference)
 		}
 		if rl.IsKeyPressed(rl.KeyT) {
-			mode = ModeTrafficLight
-			stage = StageIdle
-			draft = newDraft()
-			cutDraft = newCutDraft()
-			routePanel = RoutePanel{}
-			routeStartSplineID = -1
-			coupleModeFirstID = -1
+			setTool(ToolTrafficLight)
 		}
 		if rl.IsKeyPressed(rl.KeyD) {
 			debugMode = !debugMode
@@ -646,6 +721,7 @@ func main() {
 					paused = true
 					stage = StageIdle
 					draft = newDraft()
+					quadraticDraft = newQuadraticDraft()
 					cutDraft = newCutDraft()
 					routePanel = RoutePanel{}
 					routeStartSplineID = -1
@@ -677,21 +753,21 @@ func main() {
 
 		// Toolbar click — switch mode / toggle debug
 		if rl.IsMouseButtonPressed(rl.MouseButtonLeft) && mouseOnToolbar {
-			for i, item := range toolbarItems {
+			for i, item := range modeToolbarItems {
 				if rl.CheckCollisionPointRec(mouseScreenRL, toolbarBtnRect(i)) {
 					if item.isDbg {
 						debugMode = !debugMode
 					} else if item.isHitbox {
 						hitboxDebugMode = !hitboxDebugMode
 					} else {
-						mode = item.mode
-						stage = StageIdle
-						draft = newDraft()
-						cutDraft = newCutDraft()
-						routePanel = RoutePanel{}
-						routeStartSplineID = -1
-						coupleModeFirstID = -1
+						setMode(item.mode)
 					}
+					break
+				}
+			}
+			for i, item := range toolsForMode(mode) {
+				if rl.CheckCollisionPointRec(mouseScreenRL, toolBtnRect(i)) {
+					setTool(item.tool)
 					break
 				}
 			}
@@ -718,6 +794,7 @@ func main() {
 		baseThickness := pixelsToWorld(camera.Zoom, linePixels)
 
 		hoveredSpline := findHoveredSpline(splines, mouseWorld, hoverRadius)
+		hoveredNode := findNearbyEndpoint(splines, mouseWorld, snapRadius)
 		hoveredEnd := findNearbyEnd(splines, mouseWorld, snapRadius)
 		hoveredStart := findNearbyStart(splines, mouseWorld, snapRadius)
 
@@ -758,23 +835,44 @@ func main() {
 		}
 
 		if !routePanel.Open && !mouseOnToolbar {
-			switch mode {
-			case ModeEdit:
+			switch tool {
+			case ToolSpline:
 				var topologyChanged bool
-				stage, draft, splines, nextSplineID, topologyChanged = handleEditMode(stage, draft, splines, hoveredSpline, hoveredEnd, hoveredStart, mouseWorld, nextSplineID)
+				stage, draft, splines, nextSplineID, topologyChanged = handleEditMode(stage, draft, splines, hoveredSpline, hoveredNode, mouseWorld, nextSplineID)
 				if topologyChanged {
 					routes = refreshRoutes(routes, splines)
 					cars = cars[:0]
 					laneChangeSplines = laneChangeSplines[:0]
 				}
-			case ModeRoute:
+			case ToolQuadratic:
+				var topologyChanged bool
+				var notice string
+				stage, quadraticDraft, splines, nextSplineID, topologyChanged, notice = handleQuadraticMode(stage, quadraticDraft, splines, hoveredSpline, hoveredNode, mouseWorld, nextSplineID)
+				if topologyChanged {
+					routes = refreshRoutes(routes, splines)
+					cars = cars[:0]
+					laneChangeSplines = laneChangeSplines[:0]
+				}
+				if notice != "" {
+					noticeText = notice
+					noticeTimer = 3.0
+				}
+			case ToolReverse:
+				var topologyChanged bool
+				splines, trafficLights, topologyChanged = handleReverseMode(splines, trafficLights, hoveredSpline)
+				if topologyChanged {
+					routes = refreshRoutes(routes, splines)
+					cars = cars[:0]
+					laneChangeSplines = laneChangeSplines[:0]
+				}
+			case ToolRouteCars:
 				var notice string
 				routeStartSplineID, routePanel, notice = handleRouteMode(routeStartSplineID, routePanel, routes, baseGraph, hoveredStart, hoveredEnd, VehicleCar)
 				if notice != "" {
 					noticeText = notice
 					noticeTimer = 3.0
 				}
-			case ModeBus:
+			case ToolRouteBuses:
 				var notice string
 				if routeStartSplineID < 0 && rl.IsMouseButtonPressed(rl.MouseButtonRight) && hoveredSpline >= 0 {
 					splines, notice = toggleBusOnlySpline(splines, hoveredSpline)
@@ -787,16 +885,16 @@ func main() {
 					noticeText = notice
 					noticeTimer = 3.0
 				}
-			case ModePriority:
+			case ToolPriority:
 				splines = handlePriorityMode(splines, hoveredSpline)
-			case ModeCouple:
+			case ToolCouple:
 				var coupleNotice string
 				coupleModeFirstID, splines, coupleNotice = handleCoupleMode(coupleModeFirstID, splines, hoveredSpline)
 				if coupleNotice != "" {
 					noticeText = coupleNotice
 					noticeTimer = 3.0
 				}
-			case ModeCut:
+			case ToolCut:
 				var topologyChanged bool
 				stage, cutDraft, splines, nextSplineID, topologyChanged = handleCutMode(stage, cutDraft, splines, mouseWorld, nextSplineID)
 				if topologyChanged {
@@ -804,12 +902,12 @@ func main() {
 					cars = cars[:0]
 					laneChangeSplines = laneChangeSplines[:0]
 				}
-			case ModeSpeedLimit:
+			case ToolSpeedLimit:
 				splines = handleSpeedLimitMode(splines, hoveredSpline, selectedSpeedKmh)
 				selectedSpeedKmh = updateSpeedLimitPanel(selectedSpeedKmh)
-			case ModePreference:
+			case ToolPreference:
 				splines, lastPref = handlePreferenceMode(splines, hoveredSpline, lastPref)
-			case ModeTrafficLight:
+			case ToolTrafficLight:
 				phaseCount := 0
 				if editingCycleID >= 0 {
 					for _, c := range trafficCycles {
@@ -1066,6 +1164,7 @@ func main() {
 		drawAxes(camera)
 
 		splineIndexByID := simpkg.BuildSplineIndexByID(splines)
+		directionWarnings := findDirectionWarnings(splines)
 		for _, route := range routes {
 			if !route.Valid {
 				continue
@@ -1091,7 +1190,7 @@ func main() {
 				thickness = maxf(thickness, pixelsToWorld(camera.Zoom, 4))
 			}
 			if i == hoveredSpline {
-				if (mode == ModeEdit && stage == StageIdle) || mode == ModePriority {
+				if ((tool == ToolSpline || tool == ToolQuadratic) && stage == StageIdle) || tool == ToolPriority {
 					color = NewColor(242, 153, 74, 255)
 					thickness = pixelsToWorld(camera.Zoom, 5)
 				}
@@ -1101,43 +1200,67 @@ func main() {
 			drawEndpoint(spline.P0, handleRadius*0.8, NewColor(60, 160, 90, 255))
 			drawEndpoint(spline.P3, handleRadius, NewColor(50, 115, 225, 255))
 		}
+		drawDirectionWarnings(directionWarnings, camera.Zoom)
+		if tool == ToolReverse {
+			drawSplineDirectionArrows(splines, camera.Zoom)
+		}
 
-		if mode == ModeEdit {
-			if hoveredEnd.SplineIndex >= 0 && stage == StageIdle {
-				drawEndpoint(hoveredEnd.Point, handleRadius*1.5, NewColor(255, 196, 61, 255))
+		if tool == ToolSpline {
+			if hoveredNode.SplineIndex >= 0 && stage == StageIdle {
+				drawEndpoint(hoveredNode.Point, handleRadius*1.5, NewColor(255, 196, 61, 255))
 			}
-			if hoveredStart.SplineIndex >= 0 && stage == StageSetP3 {
-				drawEndpoint(hoveredStart.Point, handleRadius*1.5, NewColor(163, 92, 255, 255))
+			if hoveredNode.SplineIndex >= 0 && stage == StageSetP3 {
+				drawEndpoint(hoveredNode.Point, handleRadius*1.5, NewColor(163, 92, 255, 255))
 			}
 
 			previewMouse := mouseWorld
 			if rl.IsKeyDown(rl.KeyLeftControl) || rl.IsKeyDown(rl.KeyRightControl) {
 				previewMouse = snapToGrid(mouseWorld, 4.0)
 			}
-			preview, hasPreview := buildPreview(stage, draft, previewMouse, hoveredStart, splines)
+			preview, hasPreview := buildPreview(stage, draft, previewMouse, hoveredNode, splines)
 			if hasPreview {
+				drawEditSnapHint(stage, draft, hoveredNode, splines, previewMouse, camera.Zoom)
 				drawDraft(stage, draft, previewMouse, camera.Zoom)
 				drawSpline(preview, pixelsToWorld(camera.Zoom, 4), NewColor(214, 76, 76, 255))
 			}
 		}
+		if tool == ToolQuadratic {
+			if hoveredNode.SplineIndex >= 0 && stage == StageIdle {
+				drawEndpoint(hoveredNode.Point, handleRadius*1.5, NewColor(255, 196, 61, 255))
+			}
 
-		if mode == ModeRoute {
+			previewMouse := mouseWorld
+			if rl.IsKeyDown(rl.KeyLeftControl) || rl.IsKeyDown(rl.KeyRightControl) {
+				previewMouse = snapToGrid(mouseWorld, 4.0)
+			}
+			preview, hasPreview := buildQuadraticPreview(stage, quadraticDraft, previewMouse, hoveredNode, splines)
+			if hasPreview {
+				drawQuadraticSnapHint(stage, quadraticDraft, hoveredNode, splines, previewMouse, camera.Zoom)
+				drawQuadraticDraft(stage, quadraticDraft, previewMouse, camera.Zoom)
+				drawSpline(preview, pixelsToWorld(camera.Zoom, 4), NewColor(214, 76, 76, 255))
+			}
+		}
+		if tool == ToolReverse && hoveredSpline >= 0 {
+			drawSpline(splines[hoveredSpline], pixelsToWorld(camera.Zoom, 4), NewColor(255, 120, 40, 180))
+		}
+
+		if tool == ToolRouteCars {
 			drawRoutePicking(routeStartSplineID, routePanel, hoveredStart, hoveredEnd, splines, baseGraph, camera.Zoom)
 		}
-		if mode == ModeBus {
+		if tool == ToolRouteBuses {
 			drawRoutePicking(routeStartSplineID, routePanel, hoveredStart, hoveredEnd, splines, baseGraph, camera.Zoom)
 			if routePanel.Open && routePanel.AddingBusStop {
 				drawBusStopPlacementPreview(routePanel, splines, baseGraph, mouseWorld, camera.Zoom)
 			}
 		}
 
-		if mode == ModeCouple {
+		if tool == ToolCouple {
 			drawCoupleMode(splines, coupleModeFirstID, hoveredSpline, camera.Zoom)
 		}
-		if mode == ModeSpeedLimit {
+		if tool == ToolSpeedLimit {
 			drawSpeedLimitWorld(splines, hoveredSpline, camera.Zoom)
 		}
-		if mode == ModeCut {
+		if tool == ToolCut {
 			drawCutMode(stage, cutDraft, splines, mouseWorld, camera.Zoom)
 		}
 		allSplineIndexByID := simpkg.BuildSplineIndexByID(allSplines)
@@ -1151,7 +1274,7 @@ func main() {
 			drawLaneChangeSplines(laneChangeSplines, camera.Zoom)
 		}
 		drawTrafficLights(trafficLights, pendingLights, trafficCycles, editingCycleID, editingPhaseIdx, showPhaseIdx, camera.Zoom)
-		if mode == ModeTrafficLight && (editingCycleID < 0 || editingLights) && editingPhaseIdx < 0 {
+		if tool == ToolTrafficLight && (editingCycleID < 0 || editingLights) && editingPhaseIdx < 0 {
 			if _, _, snap, found := findNearestSplinePoint(splines, mouseWorld); found {
 				r := pixelsToWorld(camera.Zoom, 8)
 				drawCircleV(snap, r, NewColor(255, 200, 0, 180))
@@ -1159,32 +1282,42 @@ func main() {
 			}
 		}
 		rl.EndMode2D()
+		drawDirectionWarningLabels(directionWarnings, camera)
 
 		drawScaleBar(camera.Zoom)
-		if mode == ModeEdit {
+		if tool == ToolSpline {
 			previewMouse := mouseWorld
 			if rl.IsKeyDown(rl.KeyLeftControl) || rl.IsKeyDown(rl.KeyRightControl) {
 				previewMouse = snapToGrid(mouseWorld, 4.0)
 			}
-			if preview, hasPreview := buildPreview(stage, draft, previewMouse, hoveredStart, splines); hasPreview {
+			if preview, hasPreview := buildPreview(stage, draft, previewMouse, hoveredNode, splines); hasPreview {
 				drawDraftInfo(stage, draft, previewMouse, preview, camera)
 			}
 		}
-		if mode == ModeSpeedLimit {
+		if tool == ToolQuadratic {
+			previewMouse := mouseWorld
+			if rl.IsKeyDown(rl.KeyLeftControl) || rl.IsKeyDown(rl.KeyRightControl) {
+				previewMouse = snapToGrid(mouseWorld, 4.0)
+			}
+			if preview, hasPreview := buildQuadraticPreview(stage, quadraticDraft, previewMouse, hoveredNode, splines); hasPreview {
+				drawQuadraticDraftInfo(stage, quadraticDraft, previewMouse, preview, camera)
+			}
+		}
+		if tool == ToolSpeedLimit {
 			drawSpeedLimitLabels(splines, camera)
 			drawCarSpeedLabels(cars, allSplines, allSplineIndexByID, camera)
 		}
-		if mode == ModePreference {
+		if tool == ToolPreference {
 			drawPreferenceLabels(splines, camera)
 		}
-		drawHud(mode, stage, draft, hoveredSpline, routeStartSplineID, coupleModeFirstID, debugMode, hitboxDebugMode, camera.Zoom, len(splines), len(routes), len(cars))
+		drawHud(mode, tool, stage, draft, quadraticDraft, hoveredSpline, routeStartSplineID, coupleModeFirstID, debugMode, hitboxDebugMode, camera.Zoom, len(splines), len(routes), len(cars))
 		if profileMode {
 			drawProfilerOverlay(prof)
 		}
-		if mode == ModeTrafficLight {
+		if tool == ToolTrafficLight {
 			drawTrafficCyclePanel(pendingLights, trafficLights, trafficCycles, editingCycleID, editingLights, editingPhaseIdx, activeDurInput, durInputStr, showPhaseIdx)
 		}
-		if mode == ModeSpeedLimit {
+		if tool == ToolSpeedLimit {
 			drawSpeedLimitPanel(selectedSpeedKmh)
 		}
 		if routePanel.Open {
@@ -1210,7 +1343,231 @@ func snapToGrid(v Vec2, gridSize float32) Vec2 {
 	}
 }
 
-func handleEditMode(stage Stage, draft Draft, splines []Spline, hoveredSpline int, hoveredEnd EndHit, hoveredStart EndHit, mouseWorld Vec2, nextSplineID int) (Stage, Draft, []Spline, int, bool) {
+func projectPointOntoAxis(point, origin, axisDir Vec2) Vec2 {
+	if vectorLengthSq(axisDir) <= 1e-9 {
+		return origin
+	}
+	dir := normalize(axisDir)
+	dist := dot(vecSub(point, origin), dir)
+	return vecAdd(origin, vecScale(dir, dist))
+}
+
+func lineIntersection(originA, dirA, originB, dirB Vec2) (Vec2, bool) {
+	denom := cross2D(dirA, dirB)
+	if absf(denom) <= 1e-6 {
+		return Vec2{}, false
+	}
+	delta := vecSub(originB, originA)
+	t := cross2D(delta, dirB) / denom
+	return vecAdd(originA, vecScale(dirA, t)), true
+}
+
+func mirroredP1FromPrevSpline(prev Spline) Vec2 {
+	return vecAdd(prev.P3, vecSub(prev.P3, prev.P2))
+}
+
+func mirroredP2FromNextSpline(next Spline) Vec2 {
+	return vecSub(vecScale(next.P0, 2), next.P1)
+}
+
+func endpointAnchor(spline Spline, kind EndKind) Vec2 {
+	if kind == EndStart {
+		return spline.P0
+	}
+	return spline.P3
+}
+
+func endpointAxisDir(spline Spline, kind EndKind) Vec2 {
+	if kind == EndStart {
+		return vecSub(spline.P0, spline.P1)
+	}
+	return vecSub(spline.P3, spline.P2)
+}
+
+func mirroredHandleAtEndpoint(spline Spline, kind EndKind) Vec2 {
+	anchor := endpointAnchor(spline, kind)
+	if kind == EndStart {
+		return vecSub(vecScale(anchor, 2), spline.P1)
+	}
+	return vecSub(vecScale(anchor, 2), spline.P2)
+}
+
+func draftP1Preview(draft Draft, mouse Vec2) Vec2 {
+	if draft.LockP1 {
+		return projectPointOntoAxis(mouse, draft.P0, draft.P1AxisDir)
+	}
+	return mouse
+}
+
+func draftP2Preview(draft Draft, mouse Vec2) Vec2 {
+	if draft.SnapP3 {
+		return projectPointOntoAxis(mouse, draft.P3, draft.P2AxisDir)
+	}
+	return mouse
+}
+
+func newQuadraticDraft() QuadraticDraft {
+	return QuadraticDraft{}
+}
+
+func newQuadraticSpline(id int, p0, m, p3 Vec2) Spline {
+	p1 := vecAdd(p0, vecScale(vecSub(m, p0), 2.0/3.0))
+	p2 := vecAdd(p3, vecScale(vecSub(m, p3), 2.0/3.0))
+	return simpkg.NewSpline(id, p0, p1, p2, p3)
+}
+
+func quadraticMirroredMFromPrevSpline(prev Spline) Vec2 {
+	return vecAdd(prev.P3, vecSub(prev.P3, prev.P2))
+}
+
+func quadraticMirroredMFromNextSpline(next Spline) Vec2 {
+	return vecSub(vecScale(next.P0, 2), next.P1)
+}
+
+func quadraticMOnPrevAxis(draft QuadraticDraft, mouse Vec2) Vec2 {
+	if draft.FromPrevAxis {
+		return projectPointOntoAxis(mouse, draft.P0, draft.PrevAxisDir)
+	}
+	return mouse
+}
+
+func quadraticMOnNextAxis(draft QuadraticDraft, mouse Vec2) Vec2 {
+	if draft.SnapP3 {
+		return projectPointOntoAxis(mouse, draft.P3, draft.NextAxisDir)
+	}
+	return draft.M
+}
+
+func handleQuadraticMode(stage Stage, draft QuadraticDraft, splines []Spline, hoveredSpline int, hoveredNode EndHit, mouseWorld Vec2, nextSplineID int) (Stage, QuadraticDraft, []Spline, int, bool, string) {
+	topologyChanged := false
+	notice := ""
+
+	if rl.IsKeyDown(rl.KeyLeftControl) || rl.IsKeyDown(rl.KeyRightControl) {
+		mouseWorld = snapToGrid(mouseWorld, 4.0)
+	}
+
+	if rl.IsMouseButtonPressed(rl.MouseButtonRight) {
+		switch stage {
+		case StageIdle:
+			if hoveredSpline >= 0 {
+				deletedID := splines[hoveredSpline].ID
+				splines = append(splines[:hoveredSpline], splines[hoveredSpline+1:]...)
+				splines = removeSplineFromCouplings(splines, deletedID)
+				topologyChanged = true
+			}
+		case StageSetP1:
+			stage = StageIdle
+			draft = newQuadraticDraft()
+		case StageSetP2:
+			stage = StageSetP1
+			draft.M = Vec2{}
+			draft.P3 = Vec2{}
+			draft.SnapP3 = false
+			draft.NextAxisDir = Vec2{}
+			draft.MMirroredFromPrev = false
+		}
+	}
+
+	if rl.IsMouseButtonPressed(rl.MouseButtonLeft) {
+		switch stage {
+		case StageIdle:
+			draft = newQuadraticDraft()
+			if hoveredNode.SplineIndex >= 0 {
+				prev := splines[hoveredNode.SplineIndex]
+				draft.P0 = endpointAnchor(prev, hoveredNode.Kind)
+				draft.FromPrevAxis = true
+				draft.PrevAxisDir = endpointAxisDir(prev, hoveredNode.Kind)
+			} else {
+				draft.P0 = mouseWorld
+			}
+			stage = StageSetP1
+
+		case StageSetP1:
+			if hoveredNode.SplineIndex >= 0 {
+				next := splines[hoveredNode.SplineIndex]
+				nextAnchor := endpointAnchor(next, hoveredNode.Kind)
+				nextAxis := endpointAxisDir(next, hoveredNode.Kind)
+				if draft.FromPrevAxis {
+					m, ok := lineIntersection(draft.P0, draft.PrevAxisDir, nextAnchor, nextAxis)
+					if !ok {
+						notice = "A quadratic spline can't be drawn this way."
+						return stage, draft, splines, nextSplineID, topologyChanged, notice
+					}
+					spline := newQuadraticSpline(nextSplineID, draft.P0, m, nextAnchor)
+					nextSplineID++
+					splines = append(splines, spline)
+					stage = StageIdle
+					draft = newQuadraticDraft()
+					topologyChanged = true
+					break
+				}
+				draft.P3 = nextAnchor
+				draft.SnapP3 = true
+				draft.NextAxisDir = nextAxis
+				stage = StageSetP2
+				break
+			}
+
+			if !draft.FromPrevAxis && hoveredNode.SplineIndex >= 0 {
+				prev := splines[hoveredNode.SplineIndex]
+				draft.P0 = endpointAnchor(prev, hoveredNode.Kind)
+				draft.FromPrevAxis = true
+				draft.PrevAxisDir = endpointAxisDir(prev, hoveredNode.Kind)
+				draft.M = mirroredHandleAtEndpoint(prev, hoveredNode.Kind)
+				draft.MMirroredFromPrev = true
+			} else {
+				draft.M = quadraticMOnPrevAxis(draft, mouseWorld)
+				draft.MMirroredFromPrev = false
+			}
+			stage = StageSetP2
+
+		case StageSetP2:
+			if draft.SnapP3 {
+				draft.M = quadraticMOnNextAxis(draft, mouseWorld)
+				spline := newQuadraticSpline(nextSplineID, draft.P0, draft.M, draft.P3)
+				nextSplineID++
+				splines = append(splines, spline)
+				stage = StageIdle
+				draft = newQuadraticDraft()
+				topologyChanged = true
+				break
+			}
+
+			p3 := mouseWorld
+			m := draft.M
+			if hoveredNode.SplineIndex >= 0 {
+				next := splines[hoveredNode.SplineIndex]
+				nextAnchor := endpointAnchor(next, hoveredNode.Kind)
+				nextAxis := endpointAxisDir(next, hoveredNode.Kind)
+				p3 = nextAnchor
+				if draft.MMirroredFromPrev {
+					notice = "A quadratic spline can't be drawn this way."
+					return stage, draft, splines, nextSplineID, topologyChanged, notice
+				}
+				if draft.FromPrevAxis {
+					var ok bool
+					m, ok = lineIntersection(draft.P0, draft.PrevAxisDir, nextAnchor, nextAxis)
+					if !ok {
+						notice = "A quadratic spline can't be drawn this way."
+						return stage, draft, splines, nextSplineID, topologyChanged, notice
+					}
+				} else {
+					m = mirroredHandleAtEndpoint(next, hoveredNode.Kind)
+				}
+			}
+			spline := newQuadraticSpline(nextSplineID, draft.P0, m, p3)
+			nextSplineID++
+			splines = append(splines, spline)
+			stage = StageIdle
+			draft = newQuadraticDraft()
+			topologyChanged = true
+		}
+	}
+
+	return stage, draft, splines, nextSplineID, topologyChanged, notice
+}
+
+func handleEditMode(stage Stage, draft Draft, splines []Spline, hoveredSpline int, hoveredNode EndHit, mouseWorld Vec2, nextSplineID int) (Stage, Draft, []Spline, int, bool) {
 	topologyChanged := false
 
 	if rl.IsKeyDown(rl.KeyLeftControl) || rl.IsKeyDown(rl.KeyRightControl) {
@@ -1231,6 +1588,9 @@ func handleEditMode(stage Stage, draft Draft, splines []Spline, hoveredSpline in
 			draft = newDraft()
 		case StageSetP3:
 			draft.HasP2 = false
+			draft.SnapP3 = false
+			draft.P2AxisDir = Vec2{}
+			draft.P3 = Vec2{}
 			stage = StageSetP2
 		}
 	}
@@ -1239,37 +1599,57 @@ func handleEditMode(stage Stage, draft Draft, splines []Spline, hoveredSpline in
 		switch stage {
 		case StageIdle:
 			draft = newDraft()
-			if hoveredEnd.SplineIndex >= 0 {
-				prev := splines[hoveredEnd.SplineIndex]
-				draft.P0 = prev.P3
+			if hoveredNode.SplineIndex >= 0 {
+				prev := splines[hoveredNode.SplineIndex]
+				draft.P0 = endpointAnchor(prev, hoveredNode.Kind)
 				draft.ContinuationFrom = prev.ID
 				draft.LockP1 = true
-				draft.P1 = vecAdd(draft.P0, vecSub(prev.P3, prev.P2))
-				draft.HasP1 = true
+				draft.P1AxisDir = endpointAxisDir(prev, hoveredNode.Kind)
 			} else {
 				draft.P0 = mouseWorld
 			}
 			stage = StageSetP1
 
 		case StageSetP1:
-			if !draft.LockP1 {
-				draft.P1 = mouseWorld
+			if !draft.LockP1 && hoveredNode.SplineIndex >= 0 {
+				prev := splines[hoveredNode.SplineIndex]
+				draft.P0 = endpointAnchor(prev, hoveredNode.Kind)
+				draft.P1 = mirroredHandleAtEndpoint(prev, hoveredNode.Kind)
+				draft.HasP1 = true
+				draft.LockP1 = false
+				draft.P1AxisDir = Vec2{}
+			} else {
+				draft.P1 = draftP1Preview(draft, mouseWorld)
 				draft.HasP1 = true
 			}
 			stage = StageSetP2
 
 		case StageSetP2:
-			draft.P2 = mouseWorld
-			draft.HasP2 = true
+			if hoveredNode.SplineIndex >= 0 {
+				next := splines[hoveredNode.SplineIndex]
+				draft.SnapP3 = true
+				draft.P3 = endpointAnchor(next, hoveredNode.Kind)
+				draft.P2AxisDir = endpointAxisDir(next, hoveredNode.Kind)
+				draft.HasP2 = false
+			} else {
+				draft.P2 = mouseWorld
+				draft.HasP2 = true
+				draft.SnapP3 = false
+				draft.P2AxisDir = Vec2{}
+				draft.P3 = Vec2{}
+			}
 			stage = StageSetP3
 
 		case StageSetP3:
 			p2 := draft.P2
 			p3 := mouseWorld
-			if hoveredStart.SplineIndex >= 0 {
-				next := splines[hoveredStart.SplineIndex]
-				p3 = next.P0
-				p2 = vecSub(vecScale(p3, 2), next.P1)
+			if draft.SnapP3 {
+				p3 = draft.P3
+				p2 = draftP2Preview(draft, mouseWorld)
+			} else if hoveredNode.SplineIndex >= 0 {
+				next := splines[hoveredNode.SplineIndex]
+				p3 = endpointAnchor(next, hoveredNode.Kind)
+				p2 = mirroredHandleAtEndpoint(next, hoveredNode.Kind)
 			}
 			spline := simpkg.NewSpline(nextSplineID, draft.P0, draft.P1, p2, p3)
 			nextSplineID++
@@ -1458,6 +1838,38 @@ func buildStartsByNode(splines []Spline) map[string][]int {
 		startsByNode[key] = append(startsByNode[key], i)
 	}
 	return startsByNode
+}
+
+func findDirectionWarnings(splines []Spline) []DirectionWarning {
+	type nodeCounts struct {
+		point  Vec2
+		starts int
+		ends   int
+	}
+	nodes := map[string]*nodeCounts{}
+	for _, spline := range splines {
+		startKey := pointKey(spline.P0)
+		if nodes[startKey] == nil {
+			nodes[startKey] = &nodeCounts{point: spline.P0}
+		}
+		nodes[startKey].starts++
+
+		endKey := pointKey(spline.P3)
+		if nodes[endKey] == nil {
+			nodes[endKey] = &nodeCounts{point: spline.P3}
+		}
+		nodes[endKey].ends++
+	}
+
+	warnings := make([]DirectionWarning, 0)
+	for _, node := range nodes {
+		if node.starts >= 2 && node.ends == 0 {
+			warnings = append(warnings, DirectionWarning{Point: node.point})
+		} else if node.ends >= 2 && node.starts == 0 {
+			warnings = append(warnings, DirectionWarning{Point: node.point})
+		}
+	}
+	return warnings
 }
 
 func drawBusStopPlacementPreview(panel RoutePanel, splines []Spline, graph *RoadGraph, mouseWorld Vec2, zoom float32) {
@@ -2447,6 +2859,32 @@ func removeSplineFromCouplings(splines []Spline, deletedID int) []Spline {
 	return splines
 }
 
+func reverseSpline(spline Spline) Spline {
+	reversed := simpkg.NewSpline(spline.ID, spline.P3, spline.P2, spline.P1, spline.P0)
+	reversed.Priority = spline.Priority
+	reversed.BusOnly = spline.BusOnly
+	reversed.HardCoupledIDs = append([]int(nil), spline.HardCoupledIDs...)
+	reversed.SoftCoupledIDs = append([]int(nil), spline.SoftCoupledIDs...)
+	reversed.SpeedLimitKmh = spline.SpeedLimitKmh
+	reversed.LanePreference = spline.LanePreference
+	return reversed
+}
+
+func handleReverseMode(splines []Spline, lights []TrafficLight, hoveredSpline int) ([]Spline, []TrafficLight, bool) {
+	if hoveredSpline < 0 || !rl.IsMouseButtonPressed(rl.MouseButtonLeft) {
+		return splines, lights, false
+	}
+	oldSpline := splines[hoveredSpline]
+	reversed := reverseSpline(oldSpline)
+	splines[hoveredSpline] = reversed
+	for i := range lights {
+		if lights[i].SplineID == reversed.ID {
+			lights[i].DistOnSpline = maxf(reversed.Length-lights[i].DistOnSpline, 0)
+		}
+	}
+	return splines, lights, true
+}
+
 func findSplineIndexByID(splines []Spline, id int) int {
 	for i, s := range splines {
 		if s.ID == id {
@@ -3217,43 +3655,73 @@ func drawNotice(text string) {
 	drawText(text, x+14, y+8, 18, rl.White)
 }
 
-func modeStatusText(mode EditorMode, stage Stage, draft Draft, routeStartSplineID, coupleModeFirstID int) string {
-	switch mode {
-	case ModeEdit:
+func modeStatusText(mode EditorMode, tool EditorTool, stage Stage, draft Draft, quadraticDraft QuadraticDraft, routeStartSplineID, coupleModeFirstID int) string {
+	switch tool {
+	case ToolSpline:
 		return stageLabel(stage, draft)
-	case ModeRoute:
+	case ToolQuadratic:
+		switch stage {
+		case StageIdle:
+			return "Idle"
+		case StageSetP1:
+			if quadraticDraft.FromPrevAxis {
+				return "Choose M on the previous spline axis"
+			}
+			return "Choose M or click a spline end/start"
+		case StageSetP2:
+			if quadraticDraft.SnapP3 {
+				return "Choose M on the next spline axis"
+			}
+			return "Choose P3"
+		default:
+			return "Quadratic tool"
+		}
+	case ToolReverse:
+		return "Left click a spline to reverse its direction"
+	case ToolRouteCars:
 		if routeStartSplineID >= 0 {
 			return fmt.Sprintf("Pick destination for start spline #%d", routeStartSplineID)
 		}
 		return "Click a spline start to begin a route"
-	case ModeBus:
+	case ToolRouteBuses:
 		if routeStartSplineID >= 0 {
 			return fmt.Sprintf("Pick destination for bus line start spline #%d", routeStartSplineID)
 		}
 		return "Left click: begin a bus line   Right click on a spline: toggle bus-only"
-	case ModePriority:
+	case ToolPriority:
 		return "Left click: set priority   Right click: clear"
-	case ModeCouple:
+	case ToolCouple:
 		if coupleModeFirstID >= 0 {
 			return fmt.Sprintf("Click second spline to couple/decouple with #%d  (right-click cancels)", coupleModeFirstID)
 		}
 		return "Click a spline to select it"
-	case ModeCut:
+	case ToolCut:
 		if stage == StageSetP1 {
 			return "Place tangent handle at cut point  (right-click cancels)"
 		}
 		return "Click a spline to cut it"
-	case ModeSpeedLimit:
+	case ToolSpeedLimit:
 		return "Left click: apply speed limit   Right click: remove"
-	case ModePreference:
+	case ToolPreference:
 		return "Left click: assign 1 (reset counter)   Right click on empty: next number   Right click on assigned: remove"
-	case ModeTrafficLight:
+	case ToolTrafficLight:
 		return "Left click on spline: add light to cycle   Right click on light: remove from cycle   Then press Create"
 	}
-	return ""
+	switch mode {
+	case ModeDraw:
+		return "Draw tools"
+	case ModeRules:
+		return "Road rule tools"
+	case ModeRoute:
+		return "Route tools"
+	case ModeTraffic:
+		return "Traffic tools"
+	default:
+		return ""
+	}
 }
 
-func drawHud(mode EditorMode, stage Stage, draft Draft, hoveredSpline int, routeStartSplineID int, coupleModeFirstID int, debugMode bool, hitboxDebugMode bool, zoom float32, splineCount, routeCount, carCount int) {
+func drawHud(mode EditorMode, tool EditorTool, stage Stage, draft Draft, quadraticDraft QuadraticDraft, hoveredSpline int, routeStartSplineID int, coupleModeFirstID int, debugMode bool, hitboxDebugMode bool, zoom float32, splineCount, routeCount, carCount int) {
 	mouse := rl.GetMousePosition()
 
 	bgNormal := NewColor(245, 245, 248, 245)
@@ -3264,7 +3732,7 @@ func drawHud(mode EditorMode, stage Stage, draft Draft, hoveredSpline int, route
 	txtDark := NewColor(28, 28, 33, 255)
 	txtMuted := NewColor(100, 100, 110, 255)
 
-	for i, item := range toolbarItems {
+	for i, item := range modeToolbarItems {
 		r := toolbarBtnRect(i)
 		isActive := (!item.isDbg && !item.isHitbox && item.mode == mode) || (item.isDbg && debugMode) || (item.isHitbox && hitboxDebugMode)
 		isHovered := rl.CheckCollisionPointRec(mouse, r)
@@ -3288,9 +3756,31 @@ func drawHud(mode EditorMode, stage Stage, draft Draft, hoveredSpline int, route
 		drawText(item.label, int32(r.X)+int32(r.Width)/2-lblW/2, int32(r.Y)+int32(r.Height)-18, 13, fg)
 	}
 
+	for i, item := range toolsForMode(mode) {
+		r := toolBtnRect(i)
+		isActive := item.tool == tool
+		isHovered := rl.CheckCollisionPointRec(mouse, r)
+
+		bg, out, fg := bgNormal, outNormal, txtDark
+		if isActive {
+			bg, out, fg = bgActive, outActive, rl.White
+		} else if isHovered {
+			bg, out, fg = bgHover, outNormal, txtDark
+		}
+
+		rl.DrawRectangleRec(r, bg)
+		rl.DrawRectangleLinesEx(r, 1, out)
+
+		keyW := measureText(item.key, 36)
+		drawText(item.key, int32(r.X)+int32(r.Width)/2-keyW/2, int32(r.Y)+10, 36, fg)
+
+		lblW := measureText(item.label, 13)
+		drawText(item.label, int32(r.X)+int32(r.Width)/2-lblW/2, int32(r.Y)+int32(r.Height)-18, 13, fg)
+	}
+
 	// Status text below toolbar
-	status := modeStatusText(mode, stage, draft, routeStartSplineID, coupleModeFirstID)
-	drawText(status, int32(toolbarX), int32(toolbarY+toolbarBtnH+7), 13, txtMuted)
+	status := modeStatusText(mode, tool, stage, draft, quadraticDraft, routeStartSplineID, coupleModeFirstID)
+	drawText(status, int32(toolbarX), int32(toolbarY+2*toolbarBtnH+toolbarBtnGap+7), 13, txtMuted)
 
 	// Stats — top right
 	stats := fmt.Sprintf("Splines: %d   Routes: %d   Cars: %d   Zoom: %.1f×", splineCount, routeCount, carCount, zoom)
@@ -3338,12 +3828,15 @@ func stageLabel(stage Stage, draft Draft) string {
 		return "Idle"
 	case StageSetP1:
 		if draft.LockP1 {
-			return "P1 locked for continuity (click to confirm)"
+			return "Choose P1 on the previous spline axis"
 		}
 		return "Choose P1"
 	case StageSetP2:
-		return "Choose P2"
+		return "Choose P2 or click a next spline start"
 	case StageSetP3:
+		if draft.SnapP3 {
+			return "Choose P2 on the next spline axis"
+		}
 		return "Choose P3"
 	default:
 		return "Unknown"
@@ -3367,20 +3860,161 @@ func splineDrawColor(s Spline) Color {
 	return NewColor(35, 85, 175, 255)
 }
 
-func buildPreview(stage Stage, draft Draft, mouse Vec2, snapStart EndHit, splines []Spline) (Spline, bool) {
+func buildQuadraticPreview(stage Stage, draft QuadraticDraft, mouse Vec2, hoveredNode EndHit, splines []Spline) (Spline, bool) {
 	switch stage {
 	case StageSetP1:
-		if draft.LockP1 {
-			return simpkg.NewSpline(-1, draft.P0, draft.P1, mouse, mouse), true
+		return newQuadraticSpline(-1, draft.P0, quadraticMOnPrevAxis(draft, mouse), mouse), true
+	case StageSetP2:
+		if draft.SnapP3 {
+			return newQuadraticSpline(-1, draft.P0, quadraticMOnNextAxis(draft, mouse), draft.P3), true
 		}
-		return simpkg.NewSpline(-1, draft.P0, mouse, mouse, mouse), true
+		if hoveredNode.SplineIndex >= 0 {
+			next := splines[hoveredNode.SplineIndex]
+			p3 := endpointAnchor(next, hoveredNode.Kind)
+			if draft.MMirroredFromPrev {
+				return newQuadraticSpline(-1, draft.P0, draft.M, mouse), true
+			}
+			if draft.FromPrevAxis {
+				if m, ok := lineIntersection(draft.P0, draft.PrevAxisDir, p3, endpointAxisDir(next, hoveredNode.Kind)); ok {
+					return newQuadraticSpline(-1, draft.P0, m, p3), true
+				}
+				return newQuadraticSpline(-1, draft.P0, draft.M, mouse), true
+			}
+			return newQuadraticSpline(-1, draft.P0, mirroredHandleAtEndpoint(next, hoveredNode.Kind), p3), true
+		}
+		return newQuadraticSpline(-1, draft.P0, draft.M, mouse), true
+	default:
+		return Spline{}, false
+	}
+}
+
+func drawQuadraticDraft(stage Stage, draft QuadraticDraft, mouse Vec2, zoom float32) {
+	lineThickness := pixelsToWorld(zoom, 1.5)
+	handleRadius := pixelsToWorld(zoom, handlePixels)
+	guide := NewColor(140, 140, 140, 255)
+	locked := NewColor(130, 75, 215, 255)
+
+	drawEndpoint(draft.P0, handleRadius, NewColor(215, 67, 67, 255))
+
+	switch stage {
+	case StageSetP1:
+		m := quadraticMOnPrevAxis(draft, mouse)
+		color := guide
+		if draft.FromPrevAxis {
+			color = locked
+		}
+		drawLineEx(draft.P0, m, lineThickness, color)
+		drawLineEx(m, mouse, lineThickness, guide)
+		drawEndpoint(m, handleRadius, color)
+		drawEndpoint(mouse, handleRadius, NewColor(35, 85, 175, 255))
+	case StageSetP2:
+		m := draft.M
+		p3 := mouse
+		if draft.SnapP3 {
+			m = quadraticMOnNextAxis(draft, mouse)
+			p3 = draft.P3
+		}
+		drawLineEx(draft.P0, m, lineThickness, guide)
+		drawLineEx(m, p3, lineThickness, guide)
+		drawEndpoint(m, handleRadius, mapBoolColor(draft.FromPrevAxis || draft.SnapP3, locked, guide))
+		drawEndpoint(p3, handleRadius, NewColor(35, 85, 175, 255))
+	}
+}
+
+func drawQuadraticDraftInfo(stage Stage, draft QuadraticDraft, mouseWorld Vec2, preview Spline, camera rl.Camera2D) {
+	switch stage {
+	case StageSetP1:
+		drawSegmentLabel(draft.P0, quadraticMOnPrevAxis(draft, mouseWorld), camera)
+		drawArcLabel(preview, camera)
+	case StageSetP2:
+		if draft.SnapP3 {
+			drawSegmentLabel(quadraticMOnNextAxis(draft, mouseWorld), draft.P3, camera)
+		} else {
+			drawSegmentLabel(draft.M, mouseWorld, camera)
+		}
+		drawArcLabel(preview, camera)
+	}
+}
+
+func drawQuadraticSnapHint(stage Stage, draft QuadraticDraft, hoveredNode EndHit, splines []Spline, mouse Vec2, zoom float32) {
+	anchorColor := NewColor(255, 196, 61, 220)
+	ghostColor := NewColor(163, 92, 255, 220)
+
+	switch stage {
+	case StageIdle:
+		if hoveredNode.SplineIndex < 0 {
+			return
+		}
+		prev := splines[hoveredNode.SplineIndex]
+		drawAxisHint(endpointAnchor(prev, hoveredNode.Kind), endpointAxisDir(prev, hoveredNode.Kind), mouse, zoom, anchorColor)
+	case StageSetP1:
+		if hoveredNode.SplineIndex >= 0 {
+			next := splines[hoveredNode.SplineIndex]
+			nextAnchor := endpointAnchor(next, hoveredNode.Kind)
+			nextAxis := endpointAxisDir(next, hoveredNode.Kind)
+			if draft.FromPrevAxis {
+				if m, ok := lineIntersection(draft.P0, draft.PrevAxisDir, nextAnchor, nextAxis); ok {
+					drawRing(nextAnchor, pixelsToWorld(zoom, 5.5), pixelsToWorld(zoom, 7.5), 0, 360, 20, anchorColor)
+					drawEndpoint(m, pixelsToWorld(zoom, 4.5), ghostColor)
+				}
+				return
+			}
+			drawAxisHint(nextAnchor, nextAxis, mouse, zoom, ghostColor)
+			return
+		}
+		if draft.FromPrevAxis {
+			drawAxisHint(draft.P0, draft.PrevAxisDir, mouse, zoom, ghostColor)
+			return
+		}
+		if hoveredNode.SplineIndex < 0 {
+			return
+		}
+		prev := splines[hoveredNode.SplineIndex]
+		anchor := endpointAnchor(prev, hoveredNode.Kind)
+		m := mirroredHandleAtEndpoint(prev, hoveredNode.Kind)
+		drawLineEx(anchor, m, pixelsToWorld(zoom, 1.5), anchorColor)
+		drawRing(anchor, pixelsToWorld(zoom, 5.5), pixelsToWorld(zoom, 7.5), 0, 360, 20, anchorColor)
+		drawEndpoint(m, pixelsToWorld(zoom, 4.5), ghostColor)
+	case StageSetP2:
+		if draft.SnapP3 {
+			drawAxisHint(draft.P3, draft.NextAxisDir, mouse, zoom, ghostColor)
+			return
+		}
+		if hoveredNode.SplineIndex < 0 {
+			return
+		}
+		next := splines[hoveredNode.SplineIndex]
+		anchor := endpointAnchor(next, hoveredNode.Kind)
+		drawRing(anchor, pixelsToWorld(zoom, 5.5), pixelsToWorld(zoom, 7.5), 0, 360, 20, anchorColor)
+		if draft.MMirroredFromPrev {
+			return
+		}
+		if draft.FromPrevAxis {
+			if m, ok := lineIntersection(draft.P0, draft.PrevAxisDir, anchor, endpointAxisDir(next, hoveredNode.Kind)); ok {
+				drawEndpoint(m, pixelsToWorld(zoom, 4.5), ghostColor)
+			}
+			return
+		}
+		m := mirroredHandleAtEndpoint(next, hoveredNode.Kind)
+		drawLineEx(m, anchor, pixelsToWorld(zoom, 1.5), ghostColor)
+		drawEndpoint(m, pixelsToWorld(zoom, 4.5), ghostColor)
+	}
+}
+
+func buildPreview(stage Stage, draft Draft, mouse Vec2, hoveredNode EndHit, splines []Spline) (Spline, bool) {
+	switch stage {
+	case StageSetP1:
+		return simpkg.NewSpline(-1, draft.P0, draftP1Preview(draft, mouse), mouse, mouse), true
 	case StageSetP2:
 		return simpkg.NewSpline(-1, draft.P0, draft.P1, mouse, mouse), true
 	case StageSetP3:
-		if snapStart.SplineIndex >= 0 {
-			next := splines[snapStart.SplineIndex]
-			p3 := next.P0
-			p2 := vecSub(vecScale(p3, 2), next.P1)
+		if draft.SnapP3 {
+			return simpkg.NewSpline(-1, draft.P0, draft.P1, draftP2Preview(draft, mouse), draft.P3), true
+		}
+		if hoveredNode.SplineIndex >= 0 {
+			next := splines[hoveredNode.SplineIndex]
+			p3 := endpointAnchor(next, hoveredNode.Kind)
+			p2 := mirroredHandleAtEndpoint(next, hoveredNode.Kind)
 			return simpkg.NewSpline(-1, draft.P0, draft.P1, p2, p3), true
 		}
 		return simpkg.NewSpline(-1, draft.P0, draft.P1, draft.P2, mouse), true
@@ -3400,8 +4034,9 @@ func drawDraft(stage Stage, draft Draft, mouse Vec2, zoom float32) {
 	switch stage {
 	case StageSetP1:
 		if draft.LockP1 {
-			drawLineEx(draft.P0, draft.P1, lineThickness, locked)
-			drawEndpoint(draft.P1, handleRadius, locked)
+			p1 := draftP1Preview(draft, mouse)
+			drawLineEx(draft.P0, p1, lineThickness, locked)
+			drawEndpoint(p1, handleRadius, locked)
 		} else {
 			drawLineEx(draft.P0, mouse, lineThickness, guide)
 			drawEndpoint(mouse, handleRadius, guide)
@@ -3412,12 +4047,83 @@ func drawDraft(stage Stage, draft Draft, mouse Vec2, zoom float32) {
 		drawEndpoint(draft.P1, handleRadius, mapBoolColor(draft.LockP1, locked, guide))
 		drawEndpoint(mouse, handleRadius, guide)
 	case StageSetP3:
+		p2 := draft.P2
+		p3 := mouse
+		if draft.SnapP3 {
+			p2 = draftP2Preview(draft, mouse)
+			p3 = draft.P3
+		}
 		drawLineEx(draft.P0, draft.P1, lineThickness, guide)
-		drawLineEx(draft.P1, draft.P2, lineThickness, guide)
-		drawLineEx(draft.P2, mouse, lineThickness, guide)
+		drawLineEx(draft.P1, p2, lineThickness, guide)
+		drawLineEx(p2, p3, lineThickness, guide)
 		drawEndpoint(draft.P1, handleRadius, mapBoolColor(draft.LockP1, locked, guide))
-		drawEndpoint(draft.P2, handleRadius, guide)
-		drawEndpoint(mouse, handleRadius, NewColor(35, 85, 175, 255))
+		drawEndpoint(p2, handleRadius, guide)
+		drawEndpoint(p3, handleRadius, NewColor(35, 85, 175, 255))
+	}
+}
+
+func drawAxisHint(origin, axisDir, reference Vec2, zoom float32, color Color) Vec2 {
+	if vectorLengthSq(axisDir) <= 1e-9 {
+		drawEndpoint(origin, pixelsToWorld(zoom, 5), color)
+		return origin
+	}
+	projected := projectPointOntoAxis(reference, origin, axisDir)
+	dir := normalize(axisDir)
+	dist := float32(math.Sqrt(float64(distSq(origin, projected))))
+	arm := maxf(pixelsToWorld(zoom, 34), dist)
+	start := vecSub(origin, vecScale(dir, arm))
+	end := vecAdd(origin, vecScale(dir, arm))
+	drawLineEx(start, end, pixelsToWorld(zoom, 1.5), color)
+	drawRing(origin, pixelsToWorld(zoom, 5.5), pixelsToWorld(zoom, 7.5), 0, 360, 20, color)
+	drawEndpoint(projected, pixelsToWorld(zoom, 4.5), color)
+	return projected
+}
+
+func drawEditSnapHint(stage Stage, draft Draft, hoveredNode EndHit, splines []Spline, mouse Vec2, zoom float32) {
+	anchorColor := NewColor(255, 196, 61, 220)
+	ghostColor := NewColor(163, 92, 255, 220)
+
+	switch stage {
+	case StageIdle:
+		if hoveredNode.SplineIndex < 0 {
+			return
+		}
+		prev := splines[hoveredNode.SplineIndex]
+		drawAxisHint(endpointAnchor(prev, hoveredNode.Kind), endpointAxisDir(prev, hoveredNode.Kind), mouse, zoom, anchorColor)
+	case StageSetP1:
+		if draft.LockP1 {
+			drawAxisHint(draft.P0, draft.P1AxisDir, mouse, zoom, ghostColor)
+			return
+		}
+		if hoveredNode.SplineIndex < 0 {
+			return
+		}
+		prev := splines[hoveredNode.SplineIndex]
+		anchor := endpointAnchor(prev, hoveredNode.Kind)
+		p1 := mirroredHandleAtEndpoint(prev, hoveredNode.Kind)
+		drawLineEx(anchor, p1, pixelsToWorld(zoom, 1.5), anchorColor)
+		drawRing(anchor, pixelsToWorld(zoom, 5.5), pixelsToWorld(zoom, 7.5), 0, 360, 20, anchorColor)
+		drawEndpoint(p1, pixelsToWorld(zoom, 4.5), ghostColor)
+	case StageSetP2:
+		if hoveredNode.SplineIndex < 0 {
+			return
+		}
+		next := splines[hoveredNode.SplineIndex]
+		drawAxisHint(endpointAnchor(next, hoveredNode.Kind), endpointAxisDir(next, hoveredNode.Kind), mouse, zoom, ghostColor)
+	case StageSetP3:
+		if draft.SnapP3 {
+			drawAxisHint(draft.P3, draft.P2AxisDir, mouse, zoom, ghostColor)
+			return
+		}
+		if hoveredNode.SplineIndex < 0 {
+			return
+		}
+		next := splines[hoveredNode.SplineIndex]
+		anchor := endpointAnchor(next, hoveredNode.Kind)
+		p2 := mirroredHandleAtEndpoint(next, hoveredNode.Kind)
+		drawLineEx(p2, anchor, pixelsToWorld(zoom, 1.5), ghostColor)
+		drawEndpoint(p2, pixelsToWorld(zoom, 4.5), ghostColor)
+		drawRing(anchor, pixelsToWorld(zoom, 5.5), pixelsToWorld(zoom, 7.5), 0, 360, 20, anchorColor)
 	}
 }
 
@@ -3497,7 +4203,7 @@ func drawDraftInfo(stage Stage, draft Draft, mouseWorld Vec2, preview Spline, ca
 	switch stage {
 	case StageSetP1:
 		if draft.LockP1 {
-			drawSegmentLabel(draft.P1, mouseWorld, camera)
+			drawSegmentLabel(draft.P0, draftP1Preview(draft, mouseWorld), camera)
 			drawArcLabel(preview, camera)
 		} else {
 			drawSegmentLabel(draft.P0, mouseWorld, camera)
@@ -3506,7 +4212,11 @@ func drawDraftInfo(stage Stage, draft Draft, mouseWorld Vec2, preview Spline, ca
 		drawSegmentLabel(draft.P1, mouseWorld, camera)
 		drawArcLabel(preview, camera)
 	case StageSetP3:
-		drawSegmentLabel(draft.P2, mouseWorld, camera)
+		if draft.SnapP3 {
+			drawSegmentLabel(draftP2Preview(draft, mouseWorld), draft.P3, camera)
+		} else {
+			drawSegmentLabel(draft.P2, mouseWorld, camera)
+		}
 		drawArcLabel(preview, camera)
 	}
 }
@@ -3641,8 +4351,47 @@ func drawSpline(s Spline, thickness float32, color Color) {
 	}
 }
 
+func drawSplineDirectionArrow(s Spline, zoom float32, color Color) {
+	if s.Length <= 0 {
+		return
+	}
+	center, tangent := simpkg.SampleSplineAtDistance(s, s.Length*0.5)
+	arrowLen := pixelsToWorld(zoom, 16)
+	arrowHalfWidth := pixelsToWorld(zoom, 6)
+	tip := vecAdd(center, vecScale(tangent, arrowLen*0.5))
+	base := vecSub(center, vecScale(tangent, arrowLen*0.5))
+	normal := Vec2{X: tangent.Y, Y: -tangent.X}
+	left := vecAdd(base, vecScale(normal, arrowHalfWidth))
+	right := vecSub(base, vecScale(normal, arrowHalfWidth))
+	drawLineEx(left, tip, pixelsToWorld(zoom, 2.2), color)
+	drawLineEx(right, tip, pixelsToWorld(zoom, 2.2), color)
+	drawLineEx(left, right, pixelsToWorld(zoom, 1.8), color)
+}
+
+func drawSplineDirectionArrows(splines []Spline, zoom float32) {
+	color := NewColor(255, 120, 40, 230)
+	for _, spline := range splines {
+		drawSplineDirectionArrow(spline, zoom, color)
+	}
+}
+
 func drawEndpoint(p Vec2, radius float32, color Color) {
 	drawCircleV(p, radius, color)
+}
+
+func drawDirectionWarnings(warnings []DirectionWarning, zoom float32) {
+	for _, warning := range warnings {
+		r := pixelsToWorld(zoom, 10)
+		drawCircleV(warning.Point, r, NewColor(255, 236, 150, 235))
+		drawRing(warning.Point, r*0.75, r*1.15, 0, 360, 20, NewColor(230, 120, 20, 230))
+	}
+}
+
+func drawDirectionWarningLabels(warnings []DirectionWarning, camera rl.Camera2D) {
+	for _, warning := range warnings {
+		screen := getWorldToScreen2D(warning.Point, camera)
+		drawText("!", int32(screen.X)-4, int32(screen.Y)-11, 18, NewColor(170, 60, 10, 255))
+	}
 }
 
 func findNearbyEnd(splines []Spline, point Vec2, radius float32) EndHit {
@@ -3666,6 +4415,22 @@ func findNearbyStart(splines []Spline, point Vec2, radius float32) EndHit {
 		if d <= bestDistSq {
 			bestDistSq = d
 			best = EndHit{SplineIndex: i, SplineID: spline.ID, Kind: EndStart, Point: spline.P0}
+		}
+	}
+	return best
+}
+
+func findNearbyEndpoint(splines []Spline, point Vec2, radius float32) EndHit {
+	best := EndHit{SplineIndex: -1, SplineID: -1, Kind: EndNone}
+	bestDistSq := radius * radius
+	for i, spline := range splines {
+		if d := distSq(point, spline.P0); d <= bestDistSq {
+			bestDistSq = d
+			best = EndHit{SplineIndex: i, SplineID: spline.ID, Kind: EndStart, Point: spline.P0}
+		}
+		if d := distSq(point, spline.P3); d <= bestDistSq {
+			bestDistSq = d
+			best = EndHit{SplineIndex: i, SplineID: spline.ID, Kind: EndFinish, Point: spline.P3}
 		}
 	}
 	return best

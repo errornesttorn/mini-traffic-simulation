@@ -1069,8 +1069,8 @@ func spawnVehicle(route Route, splines []Spline) Car {
 		accel = randRange(1.2, 2.0)
 		curveSpeedMultiplier = randRange(0.9, 1.05)
 	} else if hasTrailer {
-		length = randRange(5.8, 7.0) / metersPerUnit
-		width = randRange(2.35, 2.55) / metersPerUnit
+		length = randRange(4.8, 6.0) / metersPerUnit
+		width = randRange(2.25, 2.45) / metersPerUnit
 		maxSpeed = randRange(18.0, 25.0)
 		accel = randRange(1.0, 1.8)
 		curveSpeedMultiplier = randRange(0.85, 1.0)
@@ -1103,7 +1103,7 @@ func spawnVehicle(route Route, splines []Spline) Car {
 
 		if hasTrailer {
 			tLen := randRange(11.0, 13.6)
-			tWid := randRange(2.35, 2.55)
+			tWid := randRange(2.25, 2.45)
 			trailerRear := vecSub(car.RearPosition, vecScale(tangent, tLen*wheelbaseFrac))
 			r, g, b := car.Color.R, car.Color.G, car.Color.B
 			car.Trailer = Trailer{
