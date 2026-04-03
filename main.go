@@ -303,6 +303,19 @@ type DirectionWarning struct {
 	Point Vec2
 }
 
+type GeometrySnap struct {
+	Active            bool
+	SourceSplineID    int
+	SourceSplineIndex int
+	Origin            Vec2
+	AxisDir           Vec2
+	Point             Vec2
+	HasMinT           bool
+	MinT              float32
+	HasMaxT           bool
+	MaxT              float32
+}
+
 type BusStop = simpkg.BusStop
 
 type Route = simpkg.Route
@@ -797,6 +810,7 @@ func main() {
 		hoveredNode := findNearbyEndpoint(splines, mouseWorld, snapRadius)
 		hoveredEnd := findNearbyEnd(splines, mouseWorld, snapRadius)
 		hoveredStart := findNearbyStart(splines, mouseWorld, snapRadius)
+		splineToolMouse, geometrySnap := applySplineToolSnap(mouseWorld, splines, camera.Zoom)
 
 		frameProf.inputMS = sinceMS(inputStart)
 		vehicleCounts := simpkg.BuildVehicleCounts(cars)
@@ -838,7 +852,7 @@ func main() {
 			switch tool {
 			case ToolSpline:
 				var topologyChanged bool
-				stage, draft, splines, nextSplineID, topologyChanged = handleEditMode(stage, draft, splines, hoveredSpline, hoveredNode, mouseWorld, nextSplineID)
+				stage, draft, splines, nextSplineID, topologyChanged = handleEditMode(stage, draft, splines, hoveredSpline, hoveredNode, splineToolMouse, geometrySnap, nextSplineID)
 				if topologyChanged {
 					routes = refreshRoutes(routes, splines)
 					cars = cars[:0]
@@ -847,7 +861,7 @@ func main() {
 			case ToolQuadratic:
 				var topologyChanged bool
 				var notice string
-				stage, quadraticDraft, splines, nextSplineID, topologyChanged, notice = handleQuadraticMode(stage, quadraticDraft, splines, hoveredSpline, hoveredNode, mouseWorld, nextSplineID)
+				stage, quadraticDraft, splines, nextSplineID, topologyChanged, notice = handleQuadraticMode(stage, quadraticDraft, splines, hoveredSpline, hoveredNode, splineToolMouse, geometrySnap, nextSplineID)
 				if topologyChanged {
 					routes = refreshRoutes(routes, splines)
 					cars = cars[:0]
@@ -1204,8 +1218,17 @@ func main() {
 		if tool == ToolReverse {
 			drawSplineDirectionArrows(splines, camera.Zoom)
 		}
+		if geometrySnap.Active && geometrySnap.SourceSplineIndex >= 0 && (tool == ToolSpline || tool == ToolQuadratic) {
+			drawSpline(splines[geometrySnap.SourceSplineIndex], pixelsToWorld(camera.Zoom, 4), NewColor(74, 196, 186, 200))
+		}
 
 		if tool == ToolSpline {
+			if stage == StageIdle {
+				drawGeometrySnapHint(geometrySnap, splineToolMouse, camera.Zoom)
+				if geometrySnap.Active {
+					drawEndpoint(splineToolMouse, handleRadius*1.35, NewColor(74, 196, 186, 235))
+				}
+			}
 			if hoveredNode.SplineIndex >= 0 && stage == StageIdle {
 				drawEndpoint(hoveredNode.Point, handleRadius*1.5, NewColor(255, 196, 61, 255))
 			}
@@ -1213,30 +1236,32 @@ func main() {
 				drawEndpoint(hoveredNode.Point, handleRadius*1.5, NewColor(163, 92, 255, 255))
 			}
 
-			previewMouse := mouseWorld
-			if rl.IsKeyDown(rl.KeyLeftControl) || rl.IsKeyDown(rl.KeyRightControl) {
-				previewMouse = snapToGrid(mouseWorld, 4.0)
-			}
-			preview, hasPreview := buildPreview(stage, draft, previewMouse, hoveredNode, splines)
+			previewMouse := splineToolMouse
+			preview, hasPreview := buildPreview(stage, draft, previewMouse, geometrySnap, hoveredNode, splines)
 			if hasPreview {
+				drawGeometrySnapHint(geometrySnap, previewMouse, camera.Zoom)
 				drawEditSnapHint(stage, draft, hoveredNode, splines, previewMouse, camera.Zoom)
-				drawDraft(stage, draft, previewMouse, camera.Zoom)
+				drawDraft(stage, draft, previewMouse, camera.Zoom, geometrySnap)
 				drawSpline(preview, pixelsToWorld(camera.Zoom, 4), NewColor(214, 76, 76, 255))
 			}
 		}
 		if tool == ToolQuadratic {
+			if stage == StageIdle {
+				drawGeometrySnapHint(geometrySnap, splineToolMouse, camera.Zoom)
+				if geometrySnap.Active {
+					drawEndpoint(splineToolMouse, handleRadius*1.35, NewColor(74, 196, 186, 235))
+				}
+			}
 			if hoveredNode.SplineIndex >= 0 && stage == StageIdle {
 				drawEndpoint(hoveredNode.Point, handleRadius*1.5, NewColor(255, 196, 61, 255))
 			}
 
-			previewMouse := mouseWorld
-			if rl.IsKeyDown(rl.KeyLeftControl) || rl.IsKeyDown(rl.KeyRightControl) {
-				previewMouse = snapToGrid(mouseWorld, 4.0)
-			}
-			preview, hasPreview := buildQuadraticPreview(stage, quadraticDraft, previewMouse, hoveredNode, splines)
+			previewMouse := splineToolMouse
+			preview, hasPreview := buildQuadraticPreview(stage, quadraticDraft, previewMouse, geometrySnap, hoveredNode, splines)
 			if hasPreview {
+				drawGeometrySnapHint(geometrySnap, previewMouse, camera.Zoom)
 				drawQuadraticSnapHint(stage, quadraticDraft, hoveredNode, splines, previewMouse, camera.Zoom)
-				drawQuadraticDraft(stage, quadraticDraft, previewMouse, camera.Zoom)
+				drawQuadraticDraft(stage, quadraticDraft, previewMouse, camera.Zoom, geometrySnap)
 				drawSpline(preview, pixelsToWorld(camera.Zoom, 4), NewColor(214, 76, 76, 255))
 			}
 		}
@@ -1286,21 +1311,15 @@ func main() {
 
 		drawScaleBar(camera.Zoom)
 		if tool == ToolSpline {
-			previewMouse := mouseWorld
-			if rl.IsKeyDown(rl.KeyLeftControl) || rl.IsKeyDown(rl.KeyRightControl) {
-				previewMouse = snapToGrid(mouseWorld, 4.0)
-			}
-			if preview, hasPreview := buildPreview(stage, draft, previewMouse, hoveredNode, splines); hasPreview {
-				drawDraftInfo(stage, draft, previewMouse, preview, camera)
+			previewMouse := splineToolMouse
+			if preview, hasPreview := buildPreview(stage, draft, previewMouse, geometrySnap, hoveredNode, splines); hasPreview {
+				drawDraftInfo(stage, draft, previewMouse, geometrySnap, preview, camera)
 			}
 		}
 		if tool == ToolQuadratic {
-			previewMouse := mouseWorld
-			if rl.IsKeyDown(rl.KeyLeftControl) || rl.IsKeyDown(rl.KeyRightControl) {
-				previewMouse = snapToGrid(mouseWorld, 4.0)
-			}
-			if preview, hasPreview := buildQuadraticPreview(stage, quadraticDraft, previewMouse, hoveredNode, splines); hasPreview {
-				drawQuadraticDraftInfo(stage, quadraticDraft, previewMouse, preview, camera)
+			previewMouse := splineToolMouse
+			if preview, hasPreview := buildQuadraticPreview(stage, quadraticDraft, previewMouse, geometrySnap, hoveredNode, splines); hasPreview {
+				drawQuadraticDraftInfo(stage, quadraticDraft, previewMouse, geometrySnap, preview, camera)
 			}
 		}
 		if tool == ToolSpeedLimit {
@@ -1343,12 +1362,36 @@ func snapToGrid(v Vec2, gridSize float32) Vec2 {
 	}
 }
 
+func shiftDown() bool {
+	return rl.IsKeyDown(rl.KeyLeftShift) || rl.IsKeyDown(rl.KeyRightShift)
+}
+
+func ctrlDown() bool {
+	return rl.IsKeyDown(rl.KeyLeftControl) || rl.IsKeyDown(rl.KeyRightControl)
+}
+
+func axisSnapStep() float32 {
+	return 4.0
+}
+
 func projectPointOntoAxis(point, origin, axisDir Vec2) Vec2 {
 	if vectorLengthSq(axisDir) <= 1e-9 {
 		return origin
 	}
 	dir := normalize(axisDir)
 	dist := dot(vecSub(point, origin), dir)
+	return vecAdd(origin, vecScale(dir, dist))
+}
+
+func projectPointOntoAxisSnapped(point, origin, axisDir Vec2, step float32) Vec2 {
+	if vectorLengthSq(axisDir) <= 1e-9 {
+		return origin
+	}
+	dir := normalize(axisDir)
+	dist := dot(vecSub(point, origin), dir)
+	if step > 0 {
+		dist = float32(math.Round(float64(dist)/float64(step))) * step
+	}
 	return vecAdd(origin, vecScale(dir, dist))
 }
 
@@ -1360,6 +1403,133 @@ func lineIntersection(originA, dirA, originB, dirB Vec2) (Vec2, bool) {
 	delta := vecSub(originB, originA)
 	t := cross2D(delta, dirB) / denom
 	return vecAdd(originA, vecScale(dirA, t)), true
+}
+
+type geometryAxisCandidate struct {
+	Origin  Vec2
+	AxisDir Vec2
+	HasMinT bool
+	MinT    float32
+	HasMaxT bool
+	MaxT    float32
+}
+
+func perpendicular(v Vec2) Vec2 {
+	return NewVec2(-v.Y, v.X)
+}
+
+func appendGeometryLineAxis(out []geometryAxisCandidate, origin, axisDir Vec2) []geometryAxisCandidate {
+	if vectorLengthSq(axisDir) <= 1e-9 {
+		return out
+	}
+	return append(out, geometryAxisCandidate{Origin: origin, AxisDir: axisDir})
+}
+
+func appendGeometryRayAxis(out []geometryAxisCandidate, origin, axisDir Vec2) []geometryAxisCandidate {
+	if vectorLengthSq(axisDir) <= 1e-9 {
+		return out
+	}
+	return append(out, geometryAxisCandidate{
+		Origin:  origin,
+		AxisDir: axisDir,
+		HasMinT: true,
+		MinT:    0,
+	})
+}
+
+func quadraticControlPointForSpline(spline Spline) (Vec2, bool) {
+	fromStart := vecAdd(spline.P0, vecScale(vecSub(spline.P1, spline.P0), 1.5))
+	fromEnd := vecAdd(spline.P3, vecScale(vecSub(spline.P2, spline.P3), 1.5))
+	tol := maxf(0.05, spline.Length*0.01)
+	if distSq(fromStart, fromEnd) > tol*tol {
+		return Vec2{}, false
+	}
+	return vecScale(vecAdd(fromStart, fromEnd), 0.5), true
+}
+
+func projectPointOntoCandidate(point Vec2, axis geometryAxisCandidate) Vec2 {
+	if vectorLengthSq(axis.AxisDir) <= 1e-9 {
+		return axis.Origin
+	}
+	dir := normalize(axis.AxisDir)
+	t := dot(vecSub(point, axis.Origin), dir)
+	if ctrlDown() && shiftDown() {
+		t = float32(math.Round(float64(t)/float64(axisSnapStep()))) * axisSnapStep()
+	}
+	if axis.HasMinT {
+		t = maxf(t, axis.MinT)
+	}
+	if axis.HasMaxT {
+		t = minf(t, axis.MaxT)
+	}
+	return vecAdd(axis.Origin, vecScale(dir, t))
+}
+
+func collectSplineGeometryAxes(spline Spline) []geometryAxisCandidate {
+	var axes []geometryAxisCandidate
+	startDir := vecSub(spline.P1, spline.P0)
+	endDir := vecSub(spline.P3, spline.P2)
+	axes = appendGeometryRayAxis(axes, spline.P0, vecScale(startDir, -1))
+	axes = appendGeometryLineAxis(axes, spline.P0, perpendicular(startDir))
+	axes = appendGeometryRayAxis(axes, spline.P3, endDir)
+	axes = appendGeometryLineAxis(axes, spline.P3, perpendicular(endDir))
+	if m, ok := quadraticControlPointForSpline(spline); ok {
+		spanDir := vecSub(spline.P3, spline.P0)
+		axes = appendGeometryLineAxis(axes, m, perpendicular(spanDir))
+	}
+	return axes
+}
+
+func findGeometrySnap(splines []Spline, point Vec2, radius float32) GeometrySnap {
+	best := GeometrySnap{}
+	bestDistSq := radius * radius
+	for i, spline := range splines {
+		for _, axis := range collectSplineGeometryAxes(spline) {
+			projected := projectPointOntoCandidate(point, axis)
+			if d := distSq(point, projected); d <= bestDistSq {
+				bestDistSq = d
+				best = GeometrySnap{
+					Active:            true,
+					SourceSplineID:    spline.ID,
+					SourceSplineIndex: i,
+					Origin:            axis.Origin,
+					AxisDir:           axis.AxisDir,
+					Point:             projected,
+					HasMinT:           axis.HasMinT,
+					MinT:              axis.MinT,
+					HasMaxT:           axis.HasMaxT,
+					MaxT:              axis.MaxT,
+				}
+			}
+		}
+	}
+	return best
+}
+
+func applySplineToolSnap(mouse Vec2, splines []Spline, zoom float32) (Vec2, GeometrySnap) {
+	if ctrlDown() && !shiftDown() {
+		mouse = snapToGrid(mouse, 4.0)
+	}
+	if !shiftDown() {
+		return mouse, GeometrySnap{}
+	}
+	snap := findGeometrySnap(splines, mouse, pixelsToWorld(zoom, snapPixels))
+	if !snap.Active {
+		return mouse, GeometrySnap{}
+	}
+	return snap.Point, snap
+}
+
+func axisConstrainedPoint(mouse, axisOrigin, axisDir Vec2, geometrySnap GeometrySnap) Vec2 {
+	if geometrySnap.Active {
+		if point, ok := lineIntersection(axisOrigin, axisDir, geometrySnap.Origin, geometrySnap.AxisDir); ok {
+			return point
+		}
+	}
+	if ctrlDown() && shiftDown() {
+		return projectPointOntoAxisSnapped(mouse, axisOrigin, axisDir, axisSnapStep())
+	}
+	return projectPointOntoAxis(mouse, axisOrigin, axisDir)
 }
 
 func mirroredP1FromPrevSpline(prev Spline) Vec2 {
@@ -1392,16 +1562,16 @@ func mirroredHandleAtEndpoint(spline Spline, kind EndKind) Vec2 {
 	return vecSub(vecScale(anchor, 2), spline.P2)
 }
 
-func draftP1Preview(draft Draft, mouse Vec2) Vec2 {
+func draftP1Preview(draft Draft, mouse Vec2, geometrySnap GeometrySnap) Vec2 {
 	if draft.LockP1 {
-		return projectPointOntoAxis(mouse, draft.P0, draft.P1AxisDir)
+		return axisConstrainedPoint(mouse, draft.P0, draft.P1AxisDir, geometrySnap)
 	}
 	return mouse
 }
 
-func draftP2Preview(draft Draft, mouse Vec2) Vec2 {
+func draftP2Preview(draft Draft, mouse Vec2, geometrySnap GeometrySnap) Vec2 {
 	if draft.SnapP3 {
-		return projectPointOntoAxis(mouse, draft.P3, draft.P2AxisDir)
+		return axisConstrainedPoint(mouse, draft.P3, draft.P2AxisDir, geometrySnap)
 	}
 	return mouse
 }
@@ -1424,27 +1594,23 @@ func quadraticMirroredMFromNextSpline(next Spline) Vec2 {
 	return vecSub(vecScale(next.P0, 2), next.P1)
 }
 
-func quadraticMOnPrevAxis(draft QuadraticDraft, mouse Vec2) Vec2 {
+func quadraticMOnPrevAxis(draft QuadraticDraft, mouse Vec2, geometrySnap GeometrySnap) Vec2 {
 	if draft.FromPrevAxis {
-		return projectPointOntoAxis(mouse, draft.P0, draft.PrevAxisDir)
+		return axisConstrainedPoint(mouse, draft.P0, draft.PrevAxisDir, geometrySnap)
 	}
 	return mouse
 }
 
-func quadraticMOnNextAxis(draft QuadraticDraft, mouse Vec2) Vec2 {
+func quadraticMOnNextAxis(draft QuadraticDraft, mouse Vec2, geometrySnap GeometrySnap) Vec2 {
 	if draft.SnapP3 {
-		return projectPointOntoAxis(mouse, draft.P3, draft.NextAxisDir)
+		return axisConstrainedPoint(mouse, draft.P3, draft.NextAxisDir, geometrySnap)
 	}
 	return draft.M
 }
 
-func handleQuadraticMode(stage Stage, draft QuadraticDraft, splines []Spline, hoveredSpline int, hoveredNode EndHit, mouseWorld Vec2, nextSplineID int) (Stage, QuadraticDraft, []Spline, int, bool, string) {
+func handleQuadraticMode(stage Stage, draft QuadraticDraft, splines []Spline, hoveredSpline int, hoveredNode EndHit, mouseWorld Vec2, geometrySnap GeometrySnap, nextSplineID int) (Stage, QuadraticDraft, []Spline, int, bool, string) {
 	topologyChanged := false
 	notice := ""
-
-	if rl.IsKeyDown(rl.KeyLeftControl) || rl.IsKeyDown(rl.KeyRightControl) {
-		mouseWorld = snapToGrid(mouseWorld, 4.0)
-	}
 
 	if rl.IsMouseButtonPressed(rl.MouseButtonRight) {
 		switch stage {
@@ -1508,22 +1674,13 @@ func handleQuadraticMode(stage Stage, draft QuadraticDraft, splines []Spline, ho
 				break
 			}
 
-			if !draft.FromPrevAxis && hoveredNode.SplineIndex >= 0 {
-				prev := splines[hoveredNode.SplineIndex]
-				draft.P0 = endpointAnchor(prev, hoveredNode.Kind)
-				draft.FromPrevAxis = true
-				draft.PrevAxisDir = endpointAxisDir(prev, hoveredNode.Kind)
-				draft.M = mirroredHandleAtEndpoint(prev, hoveredNode.Kind)
-				draft.MMirroredFromPrev = true
-			} else {
-				draft.M = quadraticMOnPrevAxis(draft, mouseWorld)
-				draft.MMirroredFromPrev = false
-			}
+			draft.M = quadraticMOnPrevAxis(draft, mouseWorld, geometrySnap)
+			draft.MMirroredFromPrev = false
 			stage = StageSetP2
 
 		case StageSetP2:
 			if draft.SnapP3 {
-				draft.M = quadraticMOnNextAxis(draft, mouseWorld)
+				draft.M = quadraticMOnNextAxis(draft, mouseWorld, geometrySnap)
 				spline := newQuadraticSpline(nextSplineID, draft.P0, draft.M, draft.P3)
 				nextSplineID++
 				splines = append(splines, spline)
@@ -1567,12 +1724,8 @@ func handleQuadraticMode(stage Stage, draft QuadraticDraft, splines []Spline, ho
 	return stage, draft, splines, nextSplineID, topologyChanged, notice
 }
 
-func handleEditMode(stage Stage, draft Draft, splines []Spline, hoveredSpline int, hoveredNode EndHit, mouseWorld Vec2, nextSplineID int) (Stage, Draft, []Spline, int, bool) {
+func handleEditMode(stage Stage, draft Draft, splines []Spline, hoveredSpline int, hoveredNode EndHit, mouseWorld Vec2, geometrySnap GeometrySnap, nextSplineID int) (Stage, Draft, []Spline, int, bool) {
 	topologyChanged := false
-
-	if rl.IsKeyDown(rl.KeyLeftControl) || rl.IsKeyDown(rl.KeyRightControl) {
-		mouseWorld = snapToGrid(mouseWorld, 4.0)
-	}
 
 	if rl.IsMouseButtonPressed(rl.MouseButtonRight) {
 		switch stage {
@@ -1619,7 +1772,7 @@ func handleEditMode(stage Stage, draft Draft, splines []Spline, hoveredSpline in
 				draft.LockP1 = false
 				draft.P1AxisDir = Vec2{}
 			} else {
-				draft.P1 = draftP1Preview(draft, mouseWorld)
+				draft.P1 = draftP1Preview(draft, mouseWorld, geometrySnap)
 				draft.HasP1 = true
 			}
 			stage = StageSetP2
@@ -1645,7 +1798,7 @@ func handleEditMode(stage Stage, draft Draft, splines []Spline, hoveredSpline in
 			p3 := mouseWorld
 			if draft.SnapP3 {
 				p3 = draft.P3
-				p2 = draftP2Preview(draft, mouseWorld)
+				p2 = draftP2Preview(draft, mouseWorld, geometrySnap)
 			} else if hoveredNode.SplineIndex >= 0 {
 				next := splines[hoveredNode.SplineIndex]
 				p3 = endpointAnchor(next, hoveredNode.Kind)
@@ -3860,13 +4013,13 @@ func splineDrawColor(s Spline) Color {
 	return NewColor(35, 85, 175, 255)
 }
 
-func buildQuadraticPreview(stage Stage, draft QuadraticDraft, mouse Vec2, hoveredNode EndHit, splines []Spline) (Spline, bool) {
+func buildQuadraticPreview(stage Stage, draft QuadraticDraft, mouse Vec2, geometrySnap GeometrySnap, hoveredNode EndHit, splines []Spline) (Spline, bool) {
 	switch stage {
 	case StageSetP1:
-		return newQuadraticSpline(-1, draft.P0, quadraticMOnPrevAxis(draft, mouse), mouse), true
+		return newQuadraticSpline(-1, draft.P0, quadraticMOnPrevAxis(draft, mouse, geometrySnap), mouse), true
 	case StageSetP2:
 		if draft.SnapP3 {
-			return newQuadraticSpline(-1, draft.P0, quadraticMOnNextAxis(draft, mouse), draft.P3), true
+			return newQuadraticSpline(-1, draft.P0, quadraticMOnNextAxis(draft, mouse, geometrySnap), draft.P3), true
 		}
 		if hoveredNode.SplineIndex >= 0 {
 			next := splines[hoveredNode.SplineIndex]
@@ -3888,7 +4041,7 @@ func buildQuadraticPreview(stage Stage, draft QuadraticDraft, mouse Vec2, hovere
 	}
 }
 
-func drawQuadraticDraft(stage Stage, draft QuadraticDraft, mouse Vec2, zoom float32) {
+func drawQuadraticDraft(stage Stage, draft QuadraticDraft, mouse Vec2, zoom float32, geometrySnap GeometrySnap) {
 	lineThickness := pixelsToWorld(zoom, 1.5)
 	handleRadius := pixelsToWorld(zoom, handlePixels)
 	guide := NewColor(140, 140, 140, 255)
@@ -3898,7 +4051,7 @@ func drawQuadraticDraft(stage Stage, draft QuadraticDraft, mouse Vec2, zoom floa
 
 	switch stage {
 	case StageSetP1:
-		m := quadraticMOnPrevAxis(draft, mouse)
+		m := quadraticMOnPrevAxis(draft, mouse, geometrySnap)
 		color := guide
 		if draft.FromPrevAxis {
 			color = locked
@@ -3911,7 +4064,7 @@ func drawQuadraticDraft(stage Stage, draft QuadraticDraft, mouse Vec2, zoom floa
 		m := draft.M
 		p3 := mouse
 		if draft.SnapP3 {
-			m = quadraticMOnNextAxis(draft, mouse)
+			m = quadraticMOnNextAxis(draft, mouse, geometrySnap)
 			p3 = draft.P3
 		}
 		drawLineEx(draft.P0, m, lineThickness, guide)
@@ -3921,14 +4074,14 @@ func drawQuadraticDraft(stage Stage, draft QuadraticDraft, mouse Vec2, zoom floa
 	}
 }
 
-func drawQuadraticDraftInfo(stage Stage, draft QuadraticDraft, mouseWorld Vec2, preview Spline, camera rl.Camera2D) {
+func drawQuadraticDraftInfo(stage Stage, draft QuadraticDraft, mouseWorld Vec2, geometrySnap GeometrySnap, preview Spline, camera rl.Camera2D) {
 	switch stage {
 	case StageSetP1:
-		drawSegmentLabel(draft.P0, quadraticMOnPrevAxis(draft, mouseWorld), camera)
+		drawSegmentLabel(draft.P0, quadraticMOnPrevAxis(draft, mouseWorld, geometrySnap), camera)
 		drawArcLabel(preview, camera)
 	case StageSetP2:
 		if draft.SnapP3 {
-			drawSegmentLabel(quadraticMOnNextAxis(draft, mouseWorld), draft.P3, camera)
+			drawSegmentLabel(quadraticMOnNextAxis(draft, mouseWorld, geometrySnap), draft.P3, camera)
 		} else {
 			drawSegmentLabel(draft.M, mouseWorld, camera)
 		}
@@ -4001,15 +4154,15 @@ func drawQuadraticSnapHint(stage Stage, draft QuadraticDraft, hoveredNode EndHit
 	}
 }
 
-func buildPreview(stage Stage, draft Draft, mouse Vec2, hoveredNode EndHit, splines []Spline) (Spline, bool) {
+func buildPreview(stage Stage, draft Draft, mouse Vec2, geometrySnap GeometrySnap, hoveredNode EndHit, splines []Spline) (Spline, bool) {
 	switch stage {
 	case StageSetP1:
-		return simpkg.NewSpline(-1, draft.P0, draftP1Preview(draft, mouse), mouse, mouse), true
+		return simpkg.NewSpline(-1, draft.P0, draftP1Preview(draft, mouse, geometrySnap), mouse, mouse), true
 	case StageSetP2:
 		return simpkg.NewSpline(-1, draft.P0, draft.P1, mouse, mouse), true
 	case StageSetP3:
 		if draft.SnapP3 {
-			return simpkg.NewSpline(-1, draft.P0, draft.P1, draftP2Preview(draft, mouse), draft.P3), true
+			return simpkg.NewSpline(-1, draft.P0, draft.P1, draftP2Preview(draft, mouse, geometrySnap), draft.P3), true
 		}
 		if hoveredNode.SplineIndex >= 0 {
 			next := splines[hoveredNode.SplineIndex]
@@ -4023,7 +4176,7 @@ func buildPreview(stage Stage, draft Draft, mouse Vec2, hoveredNode EndHit, spli
 	}
 }
 
-func drawDraft(stage Stage, draft Draft, mouse Vec2, zoom float32) {
+func drawDraft(stage Stage, draft Draft, mouse Vec2, zoom float32, geometrySnap GeometrySnap) {
 	lineThickness := pixelsToWorld(zoom, 1.5)
 	handleRadius := pixelsToWorld(zoom, handlePixels)
 	guide := NewColor(140, 140, 140, 255)
@@ -4034,7 +4187,7 @@ func drawDraft(stage Stage, draft Draft, mouse Vec2, zoom float32) {
 	switch stage {
 	case StageSetP1:
 		if draft.LockP1 {
-			p1 := draftP1Preview(draft, mouse)
+			p1 := draftP1Preview(draft, mouse, geometrySnap)
 			drawLineEx(draft.P0, p1, lineThickness, locked)
 			drawEndpoint(p1, handleRadius, locked)
 		} else {
@@ -4050,7 +4203,7 @@ func drawDraft(stage Stage, draft Draft, mouse Vec2, zoom float32) {
 		p2 := draft.P2
 		p3 := mouse
 		if draft.SnapP3 {
-			p2 = draftP2Preview(draft, mouse)
+			p2 = draftP2Preview(draft, mouse, geometrySnap)
 			p3 = draft.P3
 		}
 		drawLineEx(draft.P0, draft.P1, lineThickness, guide)
@@ -4077,6 +4230,33 @@ func drawAxisHint(origin, axisDir, reference Vec2, zoom float32, color Color) Ve
 	drawRing(origin, pixelsToWorld(zoom, 5.5), pixelsToWorld(zoom, 7.5), 0, 360, 20, color)
 	drawEndpoint(projected, pixelsToWorld(zoom, 4.5), color)
 	return projected
+}
+
+func drawGeometrySnapHint(geometrySnap GeometrySnap, reference Vec2, zoom float32) {
+	if !geometrySnap.Active {
+		return
+	}
+	color := NewColor(74, 196, 186, 220)
+	if vectorLengthSq(geometrySnap.AxisDir) <= 1e-9 {
+		drawEndpoint(geometrySnap.Origin, pixelsToWorld(zoom, 5), color)
+		return
+	}
+	dir := normalize(geometrySnap.AxisDir)
+	projected := geometrySnap.Point
+	arm := maxf(pixelsToWorld(zoom, 34), float32(math.Sqrt(float64(distSq(geometrySnap.Origin, projected)))))
+	start := vecSub(geometrySnap.Origin, vecScale(dir, arm))
+	end := vecAdd(geometrySnap.Origin, vecScale(dir, arm))
+	if geometrySnap.HasMinT && !geometrySnap.HasMaxT && absf(geometrySnap.MinT) <= 1e-6 {
+		start = geometrySnap.Origin
+		end = vecAdd(geometrySnap.Origin, vecScale(dir, arm))
+	}
+	if geometrySnap.HasMaxT && !geometrySnap.HasMinT && absf(geometrySnap.MaxT) <= 1e-6 {
+		start = vecSub(geometrySnap.Origin, vecScale(dir, arm))
+		end = geometrySnap.Origin
+	}
+	drawLineEx(start, end, pixelsToWorld(zoom, 1.5), color)
+	drawRing(geometrySnap.Origin, pixelsToWorld(zoom, 5.5), pixelsToWorld(zoom, 7.5), 0, 360, 20, color)
+	drawEndpoint(projected, pixelsToWorld(zoom, 4.5), color)
 }
 
 func drawEditSnapHint(stage Stage, draft Draft, hoveredNode EndHit, splines []Spline, mouse Vec2, zoom float32) {
@@ -4199,11 +4379,11 @@ func drawArcLabel(preview Spline, camera rl.Camera2D) {
 }
 
 // drawDraftInfo draws measurement labels directly on the draft segments and arc.
-func drawDraftInfo(stage Stage, draft Draft, mouseWorld Vec2, preview Spline, camera rl.Camera2D) {
+func drawDraftInfo(stage Stage, draft Draft, mouseWorld Vec2, geometrySnap GeometrySnap, preview Spline, camera rl.Camera2D) {
 	switch stage {
 	case StageSetP1:
 		if draft.LockP1 {
-			drawSegmentLabel(draft.P0, draftP1Preview(draft, mouseWorld), camera)
+			drawSegmentLabel(draft.P0, draftP1Preview(draft, mouseWorld, geometrySnap), camera)
 			drawArcLabel(preview, camera)
 		} else {
 			drawSegmentLabel(draft.P0, mouseWorld, camera)
@@ -4213,7 +4393,7 @@ func drawDraftInfo(stage Stage, draft Draft, mouseWorld Vec2, preview Spline, ca
 		drawArcLabel(preview, camera)
 	case StageSetP3:
 		if draft.SnapP3 {
-			drawSegmentLabel(draftP2Preview(draft, mouseWorld), draft.P3, camera)
+			drawSegmentLabel(draftP2Preview(draft, mouseWorld, geometrySnap), draft.P3, camera)
 		} else {
 			drawSegmentLabel(draft.P2, mouseWorld, camera)
 		}
