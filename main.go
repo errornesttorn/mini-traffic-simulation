@@ -80,6 +80,7 @@ const (
 	ToolPreference
 	ToolRouteCars
 	ToolRouteBuses
+	ToolRouteEraser
 	ToolTrafficLight
 )
 
@@ -434,6 +435,7 @@ type modeToolbarItem struct {
 	mode     EditorMode
 	isDbg    bool
 	isHitbox bool
+	isInfo   bool
 }
 
 type toolToolbarItem struct {
@@ -443,12 +445,13 @@ type toolToolbarItem struct {
 }
 
 var modeToolbarItems = []modeToolbarItem{
-	{"Dw", "Draw", ModeDraw, false, false},
-	{"Ru", "Rules", ModeRules, false, false},
-	{"Rt", "Route", ModeRoute, false, false},
-	{"Tr", "Traffic", ModeTraffic, false, false},
-	{"D", "Debug", 0, true, false},
-	{"H", "Hitbox", 0, false, true},
+	{"Dw", "Draw", ModeDraw, false, false, false},
+	{"Ru", "Rules", ModeRules, false, false, false},
+	{"Rt", "Route", ModeRoute, false, false, false},
+	{"Tr", "Traffic", ModeTraffic, false, false, false},
+	{"I", "Info", 0, false, false, true},
+	{"D", "Debug", 0, true, false, false},
+	{"H", "Hitbox", 0, false, true, false},
 }
 
 var drawToolItems = []toolToolbarItem{
@@ -468,6 +471,7 @@ var rulesToolItems = []toolToolbarItem{
 var routeToolItems = []toolToolbarItem{
 	{"R", "Cars", ToolRouteCars},
 	{"B", "Buses", ToolRouteBuses},
+	{"Z", "Erase", ToolRouteEraser},
 }
 
 var trafficToolItems = []toolToolbarItem{
@@ -514,7 +518,7 @@ func modeForTool(tool EditorTool) EditorMode {
 		return ModeDraw
 	case ToolPriority, ToolCouple, ToolSpeedLimit, ToolPreference:
 		return ModeRules
-	case ToolRouteCars, ToolRouteBuses:
+	case ToolRouteCars, ToolRouteBuses, ToolRouteEraser:
 		return ModeRoute
 	case ToolTrafficLight:
 		return ModeTraffic
@@ -599,6 +603,7 @@ func main() {
 	coupleModeFirstID := -1
 	debugMode := false
 	hitboxDebugMode := false
+	infoMode := false
 	profileMode := false
 	prof := profiler{}
 	selectedSpeedKmh := 50
@@ -676,6 +681,9 @@ func main() {
 		if rl.IsKeyPressed(rl.KeyB) {
 			setTool(ToolRouteBuses)
 		}
+		if rl.IsKeyPressed(rl.KeyZ) {
+			setTool(ToolRouteEraser)
+		}
 		if rl.IsKeyPressed(rl.KeyP) {
 			setTool(ToolPriority)
 		}
@@ -699,6 +707,9 @@ func main() {
 		}
 		if rl.IsKeyPressed(rl.KeyD) {
 			debugMode = !debugMode
+		}
+		if rl.IsKeyPressed(rl.KeyI) {
+			infoMode = !infoMode
 		}
 		if rl.IsKeyPressed(rl.KeyH) {
 			hitboxDebugMode = !hitboxDebugMode
@@ -776,6 +787,8 @@ func main() {
 				if rl.CheckCollisionPointRec(mouseScreenRL, toolbarBtnRect(i)) {
 					if item.isDbg {
 						debugMode = !debugMode
+					} else if item.isInfo {
+						infoMode = !infoMode
 					} else if item.isHitbox {
 						hitboxDebugMode = !hitboxDebugMode
 					} else {
@@ -905,6 +918,8 @@ func main() {
 					noticeText = notice
 					noticeTimer = 3.0
 				}
+			case ToolRouteEraser:
+				cars = eraseCarsAtPoint(cars, allSplines, simpkg.BuildSplineIndexByID(allSplines), mouseWorld, 5.0)
 			case ToolPriority:
 				splines = handlePriorityMode(splines, hoveredSpline)
 			case ToolCouple:
@@ -1284,6 +1299,11 @@ func main() {
 				drawBusStopPlacementPreview(routePanel, splines, baseGraph, mouseWorld, camera.Zoom)
 			}
 		}
+		if tool == ToolRouteEraser {
+			r := float32(5.0)
+			drawCircleV(mouseWorld, r, NewColor(220, 70, 70, 30))
+			drawRing(mouseWorld, r*0.94, r, 0, 360, 28, NewColor(220, 70, 70, 220))
+		}
 
 		if tool == ToolCouple {
 			drawCoupleMode(splines, coupleModeFirstID, hoveredSpline, camera.Zoom)
@@ -1335,7 +1355,7 @@ func main() {
 		if tool == ToolPreference {
 			drawPreferenceLabels(splines, camera)
 		}
-		drawHud(mode, tool, stage, draft, quadraticDraft, hoveredSpline, routeStartSplineID, coupleModeFirstID, debugMode, hitboxDebugMode, camera.Zoom, len(splines), len(routes), len(cars))
+		drawHud(mode, tool, stage, draft, quadraticDraft, hoveredSpline, routeStartSplineID, coupleModeFirstID, debugMode, hitboxDebugMode, infoMode, paused, camera.Zoom, len(splines), len(routes), len(cars))
 		if profileMode {
 			drawProfilerOverlay(prof)
 		}
@@ -1949,7 +1969,7 @@ func defaultSpawnPerMinute(vehicleKind VehicleKind) float32 {
 	if vehicleKind == VehicleBus {
 		return 4.0
 	}
-	return 12.0
+	return 15.0
 }
 
 func syncRoutePanelPath(panel RoutePanel, graph *RoadGraph) RoutePanel {
@@ -3430,7 +3450,7 @@ func updateRoutePanel(panel RoutePanel, routes []Route, cars []Car, nextRouteID 
 	if rl.IsMouseButtonPressed(rl.MouseButtonLeft) {
 		if pointInRect(mouse, sliderRect) {
 			panel.DraggingSlider = true
-			panel.SpawnPerMinute = sliderValueFromMouse(mouse.X, sliderRect, 0, spawnSliderMaxPerMinute)
+			panel.SpawnPerMinute = sliderValueFromMouse(mouse.X, sliderRect, 0, spawnSliderMaxPerMinute, routeSpawnSliderStep(panel.VehicleKind))
 		}
 		// Colour swatch clicks
 		swatchSize := float32(20)
@@ -3472,7 +3492,7 @@ func updateRoutePanel(panel RoutePanel, routes []Route, cars []Car, nextRouteID 
 	}
 	if panel.DraggingSlider {
 		if rl.IsMouseButtonDown(rl.MouseButtonLeft) {
-			panel.SpawnPerMinute = sliderValueFromMouse(mouse.X, sliderRect, 0, spawnSliderMaxPerMinute)
+			panel.SpawnPerMinute = sliderValueFromMouse(mouse.X, sliderRect, 0, spawnSliderMaxPerMinute, routeSpawnSliderStep(panel.VehicleKind))
 		} else {
 			panel.DraggingSlider = false
 		}
@@ -3545,23 +3565,55 @@ func updateRouteVisuals(routes []Route, splines []Spline, vehicleCounts map[int]
 	return simpkg.UpdateRouteVisualsWithGraph(routes, graph)
 }
 
+func carBodyPose(car Car, splines []Spline, splineIndexByID map[int]int) (frontPos, center, heading Vec2, ok bool) {
+	splineIdx, ok := splineIndexByID[car.CurrentSplineID]
+	if !ok {
+		return Vec2{}, Vec2{}, Vec2{}, false
+	}
+	splinePos, splineTangent := simpkg.SampleSplineAtDistance(splines[splineIdx], car.DistanceOnSpline)
+	rightNormal := Vec2{X: splineTangent.Y, Y: -splineTangent.X}
+	frontPos = vecAdd(splinePos, vecScale(rightNormal, car.LateralOffset))
+	heading = normalize(vecSub(frontPos, car.RearPosition))
+	if vectorLengthSq(vecSub(frontPos, car.RearPosition)) <= 1e-9 {
+		heading = splineTangent
+	}
+	center = vecScale(vecAdd(frontPos, car.RearPosition), 0.5)
+	return frontPos, center, heading, true
+}
+
+func eraseCarsAtPoint(cars []Car, splines []Spline, splineIndexByID map[int]int, center Vec2, radius float32) []Car {
+	if !rl.IsMouseButtonDown(rl.MouseButtonLeft) {
+		return cars
+	}
+	out := cars[:0]
+	radiusSq := radius * radius
+	for _, car := range cars {
+		_, bodyCenter, _, ok := carBodyPose(car, splines, splineIndexByID)
+		if !ok {
+			out = append(out, car)
+			continue
+		}
+		erase := distSq(bodyCenter, center) <= radiusSq
+		if !erase && car.Trailer.HasTrailer {
+			trailerCenter := vecScale(vecAdd(car.RearPosition, car.Trailer.RearPosition), 0.5)
+			erase = distSq(trailerCenter, center) <= radiusSq
+		}
+		if !erase {
+			out = append(out, car)
+		}
+	}
+	return out
+}
+
 func drawCars(cars []Car, splines []Spline, splineIndexByID map[int]int, zoom float32, debugMode bool) {
 	if len(cars) == 0 {
 		return
 	}
 	for _, car := range cars {
-		splineIdx, ok := splineIndexByID[car.CurrentSplineID]
+		_, center, bodyHeading, ok := carBodyPose(car, splines, splineIndexByID)
 		if !ok {
 			continue
 		}
-		splinePos, splineTangent := simpkg.SampleSplineAtDistance(splines[splineIdx], car.DistanceOnSpline)
-		rightNormal := Vec2{X: splineTangent.Y, Y: -splineTangent.X}
-		frontPos := vecAdd(splinePos, vecScale(rightNormal, car.LateralOffset))
-		bodyHeading := normalize(vecSub(frontPos, car.RearPosition))
-		if vectorLengthSq(vecSub(frontPos, car.RearPosition)) <= 1e-9 {
-			bodyHeading = splineTangent
-		}
-		center := vecScale(vecAdd(frontPos, car.RearPosition), 0.5)
 		angle := float32(math.Atan2(float64(bodyHeading.Y), float64(bodyHeading.X)) * 180 / math.Pi)
 		rect := rl.NewRectangle(center.X, center.Y, car.Length, car.Width)
 		origin := NewVec2(car.Length/2, car.Width/2)
@@ -3912,6 +3964,8 @@ func modeStatusText(mode EditorMode, tool EditorTool, stage Stage, draft Draft, 
 			return fmt.Sprintf("Pick destination for bus line start spline #%d", routeStartSplineID)
 		}
 		return "Left click: begin a bus line   Right click on a spline: toggle bus-only"
+	case ToolRouteEraser:
+		return "Hold left mouse to erase vehicles in a 5 m brush"
 	case ToolPriority:
 		return "Left click: set priority   Right click: clear"
 	case ToolCouple:
@@ -3945,7 +3999,159 @@ func modeStatusText(mode EditorMode, tool EditorTool, stage Stage, draft Draft, 
 	}
 }
 
-func drawHud(mode EditorMode, tool EditorTool, stage Stage, draft Draft, quadraticDraft QuadraticDraft, hoveredSpline int, routeStartSplineID int, coupleModeFirstID int, debugMode bool, hitboxDebugMode bool, zoom float32, splineCount, routeCount, carCount int) {
+func modeName(mode EditorMode) string {
+	switch mode {
+	case ModeDraw:
+		return "Draw"
+	case ModeRules:
+		return "Rules"
+	case ModeRoute:
+		return "Route"
+	case ModeTraffic:
+		return "Traffic"
+	default:
+		return "Unknown"
+	}
+}
+
+func toolName(tool EditorTool) string {
+	switch tool {
+	case ToolSpline:
+		return "Spline"
+	case ToolQuadratic:
+		return "Quadratic"
+	case ToolCut:
+		return "Cut"
+	case ToolReverse:
+		return "Reverse"
+	case ToolPriority:
+		return "Priority"
+	case ToolCouple:
+		return "Couple"
+	case ToolSpeedLimit:
+		return "Speed"
+	case ToolPreference:
+		return "Prefer"
+	case ToolRouteCars:
+		return "Cars"
+	case ToolRouteBuses:
+		return "Buses"
+	case ToolRouteEraser:
+		return "Erase"
+	case ToolTrafficLight:
+		return "Traffic"
+	default:
+		return "Unknown"
+	}
+}
+
+func hudInfoLines(mode EditorMode, tool EditorTool, stage Stage, draft Draft, quadraticDraft QuadraticDraft, hoveredSpline int, routeStartSplineID, coupleModeFirstID int, debugMode bool, hitboxDebugMode bool, paused bool) []string {
+	controls := []string{
+		"Global: mouse wheel zooms to cursor, Tab cycles modes, Space pauses, Ctrl+S saves, Ctrl+O loads, F3 toggles profiler.",
+	}
+	switch tool {
+	case ToolSpline:
+		controls = append(controls,
+			"Spline tool: left click places P0, then P1, then P2, then P3. Right click deletes the hovered spline when idle, cancels the current draft, or steps one stage back.",
+			"Continuation: clicking an existing spline endpoint can start from it, mirror a handle, or finish by snapping into another spline endpoint.",
+			"Geometry snap: hold Shift to snap the current point to nearby spline-derived axes. Hold Ctrl+Shift for the same axis snap with 4 m steps along the axis.",
+			"Perpendicular follow-up: if a point was snapped with Shift, hold Left Alt while confirming it to force the next free point onto a perpendicular axis through that selected point.",
+		)
+	case ToolQuadratic:
+		controls = append(controls,
+			"Quadratic tool: left click places P0, then the single middle control point M, then P3. The tool stores a normal cubic internally, so it behaves like the rest of the road network.",
+			"Continuation: clicking an existing endpoint can start from it, mirror M from a previous spline, or finish into another spline when the required axes are compatible.",
+			"Geometry snap: hold Shift to snap P0, M, or P3 to nearby geometry axes. Hold Ctrl+Shift for axis snapping with 4 m steps. Left Alt on a snapped point constrains the next free point perpendicularly.",
+			"If the current combination of previous and next spline axes is impossible for a quadratic spline, the editor will warn instead of creating invalid geometry.",
+		)
+	case ToolCut:
+		controls = append(controls,
+			"Cut tool: left click a spline to pick the cut point, then place the tangent handle. Right click cancels.",
+			"The spline is split into two new splines that preserve the original curve shape around the cut.",
+		)
+	case ToolReverse:
+		controls = append(controls,
+			"Reverse tool: left click a spline to flip its direction. The orange arrows show current direction before you click.",
+			"Exclamation marks highlight suspicious nodes where multiple splines start together or end together without an opposite-direction connection.",
+		)
+	case ToolPriority:
+		controls = append(controls,
+			"Priority tool: left click marks the hovered spline as priority, right click clears priority.",
+			"Priority splines are drawn differently and are favored during conflict handling.",
+		)
+	case ToolCouple:
+		controls = append(controls,
+			"Couple tool: left click a spline to select it, then left click another spline to couple or decouple the pair. Right click or Escape cancels the pending selection.",
+			"Coupled splines are used by lane changes and lane preference logic.",
+		)
+	case ToolSpeedLimit:
+		controls = append(controls,
+			"Speed tool: choose a speed in the panel, then left click splines to apply it. Right click a spline to clear its custom speed limit.",
+			"These limits feed directly into vehicle behavior and route timing.",
+		)
+	case ToolPreference:
+		controls = append(controls,
+			"Prefer tool: left click assigns the current preference number to the hovered spline.",
+			"Right click on empty space advances the current number. Right click a numbered spline removes its assignment.",
+			"Preference numbers help vehicles choose between coupled lanes.",
+		)
+	case ToolRouteCars:
+		controls = append(controls,
+			"Car routes: left click a spline start endpoint to pick the origin, then left click a spline end endpoint to pick the destination.",
+			"The route panel sets spawn rate and color. Existing start/end pairs reopen for editing instead of creating duplicates.",
+			"Right click or Escape cancels route picking. Bus-only splines cannot be used in car routes.",
+		)
+	case ToolRouteBuses:
+		controls = append(controls,
+			"Bus routes: left click a spline start endpoint, then a spline end endpoint, to open the line panel.",
+			"In the panel, add bus stops in travel order by choosing map intersections. Right click or Escape cancels bus-stop placement or route picking.",
+			"While idle in this tool, right click a hovered spline to toggle whether it is bus-only.",
+		)
+	case ToolRouteEraser:
+		controls = append(controls,
+			"Route eraser: hold left mouse button to delete vehicles inside a 5 m brush.",
+			"The brush removes cars and buses directly from the live simulation without changing routes or road geometry.",
+		)
+	case ToolTrafficLight:
+		controls = append(controls,
+			"Traffic tool: left click a spline to add a light candidate to the current cycle, or open the cycle panel workflow and then create phases from the selected lights.",
+			"Right click a placed light removes it. The cycle panel is used to create, edit, preview, and assign per-phase light states and durations.",
+			"Escape backs out of the current traffic editing sub-step before it closes the overall cycle UI.",
+		)
+	default:
+		controls = append(controls, fmt.Sprintf("%s mode: use the toolbar or shortcuts to switch to a tool for editing.", modeName(mode)))
+	}
+
+	_ = hoveredSpline
+	_ = routeStartSplineID
+	_ = coupleModeFirstID
+	_ = debugMode
+	_ = hitboxDebugMode
+	_ = paused
+	return controls
+}
+
+func drawInfoBox(title string, x, y, width int32, lines []string) {
+	if len(lines) == 0 {
+		return
+	}
+	lineHeight := int32(16)
+	height := int32(52) + int32(len(lines))*lineHeight
+	rect := rl.NewRectangle(float32(x), float32(y), float32(width), float32(height))
+	bg := NewColor(247, 247, 250, 240)
+	border := NewColor(202, 206, 216, 255)
+	titleCol := NewColor(34, 38, 48, 255)
+	textCol := NewColor(66, 72, 86, 255)
+
+	rl.DrawRectangleRec(rect, bg)
+	rl.DrawRectangleLinesEx(rect, 1, border)
+	drawText(title, x+12, y+10, 18, titleCol)
+	for i, line := range lines {
+		drawText(line, x+12, y+36+int32(i)*lineHeight, 13, textCol)
+	}
+}
+
+func drawHud(mode EditorMode, tool EditorTool, stage Stage, draft Draft, quadraticDraft QuadraticDraft, hoveredSpline int, routeStartSplineID int, coupleModeFirstID int, debugMode bool, hitboxDebugMode bool, infoMode bool, paused bool, zoom float32, splineCount, routeCount, carCount int) {
 	mouse := rl.GetMousePosition()
 
 	bgNormal := NewColor(245, 245, 248, 245)
@@ -3958,7 +4164,10 @@ func drawHud(mode EditorMode, tool EditorTool, stage Stage, draft Draft, quadrat
 
 	for i, item := range modeToolbarItems {
 		r := toolbarBtnRect(i)
-		isActive := (!item.isDbg && !item.isHitbox && item.mode == mode) || (item.isDbg && debugMode) || (item.isHitbox && hitboxDebugMode)
+		isActive := (!item.isDbg && !item.isHitbox && !item.isInfo && item.mode == mode) ||
+			(item.isDbg && debugMode) ||
+			(item.isHitbox && hitboxDebugMode) ||
+			(item.isInfo && infoMode)
 		isHovered := rl.CheckCollisionPointRec(mouse, r)
 
 		bg, out, fg := bgNormal, outNormal, txtDark
@@ -4002,14 +4211,17 @@ func drawHud(mode EditorMode, tool EditorTool, stage Stage, draft Draft, quadrat
 		drawText(item.label, int32(r.X)+int32(r.Width)/2-lblW/2, int32(r.Y)+int32(r.Height)-18, 13, fg)
 	}
 
-	// Status text below toolbar
-	status := modeStatusText(mode, tool, stage, draft, quadraticDraft, routeStartSplineID, coupleModeFirstID)
-	drawText(status, int32(toolbarX), int32(toolbarY+2*toolbarBtnH+toolbarBtnGap+7), 13, txtMuted)
-
 	// Stats — top right
 	stats := fmt.Sprintf("Splines: %d   Routes: %d   Cars: %d   Zoom: %.1f×", splineCount, routeCount, carCount, zoom)
 	statsW := measureText(stats, 13)
 	drawText(stats, int32(rl.GetScreenWidth())-statsW-12, 14, 13, txtMuted)
+
+	if !infoMode {
+		return
+	}
+
+	controlLines := hudInfoLines(mode, tool, stage, draft, quadraticDraft, hoveredSpline, routeStartSplineID, coupleModeFirstID, debugMode, hitboxDebugMode, paused)
+	drawInfoBox("Controls", toolbarX, toolbarY+2*toolbarBtnH+toolbarBtnGap+8, 760, controlLines)
 }
 
 func drawProfilerOverlay(prof profiler) {
@@ -4664,14 +4876,27 @@ func drawDirectionWarningLabels(warnings []DirectionWarning, camera rl.Camera2D)
 	}
 }
 
+func endpointHoverScore(mouse, anchor, axisDir Vec2) float32 {
+	offset := vecSub(mouse, anchor)
+	if vectorLengthSq(offset) <= 1e-9 || vectorLengthSq(axisDir) <= 1e-9 {
+		return 0
+	}
+	return dot(normalize(offset), normalize(axisDir))
+}
+
 func findNearbyEnd(splines []Spline, point Vec2, radius float32) EndHit {
 	best := EndHit{SplineIndex: -1, SplineID: -1, Kind: EndNone}
 	bestDistSq := radius * radius
+	bestScore := float32(-2)
+	const distTieEps float32 = 1e-4
 	for i, spline := range splines {
-		d := distSq(point, spline.P3)
-		if d <= bestDistSq {
+		anchor := spline.P3
+		d := distSq(point, anchor)
+		score := endpointHoverScore(point, anchor, endpointAxisDir(spline, EndFinish))
+		if d < bestDistSq-distTieEps || (absf(d-bestDistSq) <= distTieEps && score > bestScore) {
 			bestDistSq = d
-			best = EndHit{SplineIndex: i, SplineID: spline.ID, Kind: EndFinish, Point: spline.P3}
+			bestScore = score
+			best = EndHit{SplineIndex: i, SplineID: spline.ID, Kind: EndFinish, Point: anchor}
 		}
 	}
 	return best
@@ -4680,11 +4905,16 @@ func findNearbyEnd(splines []Spline, point Vec2, radius float32) EndHit {
 func findNearbyStart(splines []Spline, point Vec2, radius float32) EndHit {
 	best := EndHit{SplineIndex: -1, SplineID: -1, Kind: EndNone}
 	bestDistSq := radius * radius
+	bestScore := float32(-2)
+	const distTieEps float32 = 1e-4
 	for i, spline := range splines {
-		d := distSq(point, spline.P0)
-		if d <= bestDistSq {
+		anchor := spline.P0
+		d := distSq(point, anchor)
+		score := endpointHoverScore(point, anchor, endpointAxisDir(spline, EndStart))
+		if d < bestDistSq-distTieEps || (absf(d-bestDistSq) <= distTieEps && score > bestScore) {
 			bestDistSq = d
-			best = EndHit{SplineIndex: i, SplineID: spline.ID, Kind: EndStart, Point: spline.P0}
+			bestScore = score
+			best = EndHit{SplineIndex: i, SplineID: spline.ID, Kind: EndStart, Point: anchor}
 		}
 	}
 	return best
@@ -4693,14 +4923,20 @@ func findNearbyStart(splines []Spline, point Vec2, radius float32) EndHit {
 func findNearbyEndpoint(splines []Spline, point Vec2, radius float32) EndHit {
 	best := EndHit{SplineIndex: -1, SplineID: -1, Kind: EndNone}
 	bestDistSq := radius * radius
+	bestScore := float32(-2)
+	const distTieEps float32 = 1e-4
 	for i, spline := range splines {
-		if d := distSq(point, spline.P0); d <= bestDistSq {
+		startAnchor := spline.P0
+		if d := distSq(point, startAnchor); d < bestDistSq-distTieEps || (absf(d-bestDistSq) <= distTieEps && endpointHoverScore(point, startAnchor, endpointAxisDir(spline, EndStart)) > bestScore) {
 			bestDistSq = d
-			best = EndHit{SplineIndex: i, SplineID: spline.ID, Kind: EndStart, Point: spline.P0}
+			bestScore = endpointHoverScore(point, startAnchor, endpointAxisDir(spline, EndStart))
+			best = EndHit{SplineIndex: i, SplineID: spline.ID, Kind: EndStart, Point: startAnchor}
 		}
-		if d := distSq(point, spline.P3); d <= bestDistSq {
+		finishAnchor := spline.P3
+		if d := distSq(point, finishAnchor); d < bestDistSq-distTieEps || (absf(d-bestDistSq) <= distTieEps && endpointHoverScore(point, finishAnchor, endpointAxisDir(spline, EndFinish)) > bestScore) {
 			bestDistSq = d
-			best = EndHit{SplineIndex: i, SplineID: spline.ID, Kind: EndFinish, Point: spline.P3}
+			bestScore = endpointHoverScore(point, finishAnchor, endpointAxisDir(spline, EndFinish))
+			best = EndHit{SplineIndex: i, SplineID: spline.ID, Kind: EndFinish, Point: finishAnchor}
 		}
 	}
 	return best
@@ -4890,10 +5126,20 @@ func pointInRect(p Vec2, r rl.Rectangle) bool {
 	return p.X >= r.X && p.X <= r.X+r.Width && p.Y >= r.Y && p.Y <= r.Y+r.Height
 }
 
-func sliderValueFromMouse(mouseX float32, rect rl.Rectangle, minValue, maxValue float32) float32 {
+func routeSpawnSliderStep(vehicleKind VehicleKind) float32 {
+	if vehicleKind == VehicleBus {
+		return 0.5
+	}
+	return 3.0
+}
+
+func sliderValueFromMouse(mouseX float32, rect rl.Rectangle, minValue, maxValue, step float32) float32 {
 	t := clampf((mouseX-rect.X)/rect.Width, 0, 1)
 	value := minValue + t*(maxValue-minValue)
-	return float32(math.Round(float64(value*2)) / 2)
+	if step <= 0 {
+		return value
+	}
+	return float32(math.Round(float64(value/step)) * float64(step))
 }
 
 func randomizedSpawnDelay(spawnPerMinute float32) float32 {
