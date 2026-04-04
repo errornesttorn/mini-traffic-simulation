@@ -352,6 +352,7 @@ type Trailer = simpkg.Trailer
 type Car = simpkg.Car
 type TrajectorySample = simpkg.TrajectorySample
 type CollisionPrediction = simpkg.CollisionPrediction
+type BrakingProfile = simpkg.BrakingProfile
 
 type RoadGraph = simpkg.RoadGraph
 
@@ -369,6 +370,7 @@ type frameProfile struct {
 	basePathMisses int
 	allPathHits    int
 	allPathMisses  int
+	brakingDetail  BrakingProfile
 }
 
 type profiler struct {
@@ -394,10 +396,35 @@ func (p *profiler) endFrame(sample frameProfile) {
 	p.smooth.followMS = blendMetric(p.smooth.followMS, sample.followMS, alpha)
 	p.smooth.updateCarsMS = blendMetric(p.smooth.updateCarsMS, sample.updateCarsMS, alpha)
 	p.smooth.drawMS = blendMetric(p.smooth.drawMS, sample.drawMS, alpha)
+	p.smooth.brakingDetail.BasePredictMS = blendMetric(p.smooth.brakingDetail.BasePredictMS, sample.brakingDetail.BasePredictMS, alpha)
+	p.smooth.brakingDetail.ConflictScanMS = blendMetric(p.smooth.brakingDetail.ConflictScanMS, sample.brakingDetail.ConflictScanMS, alpha)
+	p.smooth.brakingDetail.BrakeProbeMS = blendMetric(p.smooth.brakingDetail.BrakeProbeMS, sample.brakingDetail.BrakeProbeMS, alpha)
+	p.smooth.brakingDetail.HoldProbeMS = blendMetric(p.smooth.brakingDetail.HoldProbeMS, sample.brakingDetail.HoldProbeMS, alpha)
+	p.smooth.brakingDetail.FinalizeMS = blendMetric(p.smooth.brakingDetail.FinalizeMS, sample.brakingDetail.FinalizeMS, alpha)
 	p.smooth.basePathHits = sample.basePathHits
 	p.smooth.basePathMisses = sample.basePathMisses
 	p.smooth.allPathHits = sample.allPathHits
 	p.smooth.allPathMisses = sample.allPathMisses
+	p.smooth.brakingDetail.Cars = sample.brakingDetail.Cars
+	p.smooth.brakingDetail.BasePredictions = sample.brakingDetail.BasePredictions
+	p.smooth.brakingDetail.StationaryPredictions = sample.brakingDetail.StationaryPredictions
+	p.smooth.brakingDetail.EscapePredictions = sample.brakingDetail.EscapePredictions
+	p.smooth.brakingDetail.FasterPredictions = sample.brakingDetail.FasterPredictions
+	p.smooth.brakingDetail.TotalPredictions = sample.brakingDetail.TotalPredictions
+	p.smooth.brakingDetail.TotalPredictionSamples = sample.brakingDetail.TotalPredictionSamples
+	p.smooth.brakingDetail.PrimaryPairCandidates = sample.brakingDetail.PrimaryPairCandidates
+	p.smooth.brakingDetail.PrimaryBroadPhasePairs = sample.brakingDetail.PrimaryBroadPhasePairs
+	p.smooth.brakingDetail.PrimaryCollisionChecks = sample.brakingDetail.PrimaryCollisionChecks
+	p.smooth.brakingDetail.PrimaryCollisionHits = sample.brakingDetail.PrimaryCollisionHits
+	p.smooth.brakingDetail.StationaryCollisionChecks = sample.brakingDetail.StationaryCollisionChecks
+	p.smooth.brakingDetail.StationaryCollisionHits = sample.brakingDetail.StationaryCollisionHits
+	p.smooth.brakingDetail.EscapeCollisionChecks = sample.brakingDetail.EscapeCollisionChecks
+	p.smooth.brakingDetail.EscapeCollisionHits = sample.brakingDetail.EscapeCollisionHits
+	p.smooth.brakingDetail.HoldCollisionChecks = sample.brakingDetail.HoldCollisionChecks
+	p.smooth.brakingDetail.HoldCollisionHits = sample.brakingDetail.HoldCollisionHits
+	p.smooth.brakingDetail.InitiallyBlamedCars = sample.brakingDetail.InitiallyBlamedCars
+	p.smooth.brakingDetail.BrakingCars = sample.brakingDetail.BrakingCars
+	p.smooth.brakingDetail.HoldCars = sample.brakingDetail.HoldCars
 }
 
 func blendMetric(prev, current, alpha float64) float64 {
@@ -847,6 +874,7 @@ func main() {
 		frameProf.brakingMS = world.BrakingMS
 		frameProf.followMS = world.FollowMS
 		frameProf.updateCarsMS = world.UpdateCarsMS
+		frameProf.brakingDetail = world.BrakingProfile
 
 		if routePanel.Open {
 			var applied bool
@@ -4231,7 +4259,7 @@ func drawProfilerOverlay(prof profiler) {
 	text := NewColor(206, 214, 228, 255)
 	muted := NewColor(150, 162, 184, 255)
 
-	rect := rl.NewRectangle(float32(rl.GetScreenWidth())-320, 42, 300, 214)
+	rect := rl.NewRectangle(float32(rl.GetScreenWidth())-420, 42, 400, 336)
 	rl.DrawRectangleRec(rect, bg)
 	rl.DrawRectangleLinesEx(rect, 1, border)
 
@@ -4250,6 +4278,18 @@ func drawProfilerOverlay(prof profiler) {
 		fmt.Sprintf("Following  %6.2f ms   avg %6.2f", cur.followMS, avg.followMS),
 		fmt.Sprintf("UpdateCars %6.2f ms   avg %6.2f", cur.updateCarsMS, avg.updateCarsMS),
 		fmt.Sprintf("Draw       %6.2f ms   avg %6.2f", cur.drawMS, avg.drawMS),
+		fmt.Sprintf("Cars       %4d", cur.brakingDetail.Cars),
+		fmt.Sprintf("BrkBase    %6.2f ms   avg %6.2f", cur.brakingDetail.BasePredictMS, avg.brakingDetail.BasePredictMS),
+		fmt.Sprintf("BrkScan    %6.2f ms   avg %6.2f", cur.brakingDetail.ConflictScanMS, avg.brakingDetail.ConflictScanMS),
+		fmt.Sprintf("BrkEscape  %6.2f ms   avg %6.2f", cur.brakingDetail.BrakeProbeMS, avg.brakingDetail.BrakeProbeMS),
+		fmt.Sprintf("BrkHold    %6.2f ms   avg %6.2f", cur.brakingDetail.HoldProbeMS, avg.brakingDetail.HoldProbeMS),
+		fmt.Sprintf("BrkFinal   %6.2f ms   avg %6.2f", cur.brakingDetail.FinalizeMS, avg.brakingDetail.FinalizeMS),
+		fmt.Sprintf("Preds      base %d  stat %d  esc %d  fast %d", cur.brakingDetail.BasePredictions, cur.brakingDetail.StationaryPredictions, cur.brakingDetail.EscapePredictions, cur.brakingDetail.FasterPredictions),
+		fmt.Sprintf("PredSamp   total %d  calls %d", cur.brakingDetail.TotalPredictionSamples, cur.brakingDetail.TotalPredictions),
+		fmt.Sprintf("PrimPairs  cand %d  broad %d", cur.brakingDetail.PrimaryPairCandidates, cur.brakingDetail.PrimaryBroadPhasePairs),
+		fmt.Sprintf("PrimColl   chk %d  hit %d", cur.brakingDetail.PrimaryCollisionChecks, cur.brakingDetail.PrimaryCollisionHits),
+		fmt.Sprintf("Rechecks   stat %d/%d  esc %d/%d  hold %d/%d", cur.brakingDetail.StationaryCollisionChecks, cur.brakingDetail.StationaryCollisionHits, cur.brakingDetail.EscapeCollisionChecks, cur.brakingDetail.EscapeCollisionHits, cur.brakingDetail.HoldCollisionChecks, cur.brakingDetail.HoldCollisionHits),
+		fmt.Sprintf("BrakeFlags blamed %d  brake %d  hold %d", cur.brakingDetail.InitiallyBlamedCars, cur.brakingDetail.BrakingCars, cur.brakingDetail.HoldCars),
 		fmt.Sprintf("Base path cache  hits %d  miss %d", cur.basePathHits, cur.basePathMisses),
 		fmt.Sprintf("All  path cache  hits %d  miss %d", cur.allPathHits, cur.allPathMisses),
 	}

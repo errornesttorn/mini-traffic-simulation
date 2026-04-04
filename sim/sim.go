@@ -200,6 +200,47 @@ type CollisionPrediction struct {
 	SplineBID       int
 }
 
+type collisionGeometry struct {
+	bodyRadius     float32
+	bodyOffsets    []float32
+	trailerRadius  float32
+	trailerOffsets []float32
+	coarseRadius   float32
+}
+
+type BrakingProfile struct {
+	Cars int
+
+	BasePredictMS  float64
+	ConflictScanMS float64
+	BrakeProbeMS   float64
+	HoldProbeMS    float64
+	FinalizeMS     float64
+
+	BasePredictions        int
+	StationaryPredictions  int
+	EscapePredictions      int
+	FasterPredictions      int
+	TotalPredictions       int
+	TotalPredictionSamples int
+
+	PrimaryPairCandidates  int
+	PrimaryBroadPhasePairs int
+	PrimaryCollisionChecks int
+	PrimaryCollisionHits   int
+
+	StationaryCollisionChecks int
+	StationaryCollisionHits   int
+	EscapeCollisionChecks     int
+	EscapeCollisionHits       int
+	HoldCollisionChecks       int
+	HoldCollisionHits         int
+
+	InitiallyBlamedCars int
+	BrakingCars         int
+	HoldCars            int
+}
+
 type pathCacheKey struct {
 	StartID     int
 	EndID       int
@@ -341,6 +382,7 @@ type World struct {
 	BasePathMisses  int
 	AllPathHits     int
 	AllPathMisses   int
+	BrakingProfile  BrakingProfile
 
 	RouteVisualsMS float64
 	LaneChangesMS  float64
@@ -413,6 +455,7 @@ func (w *World) Step(dt float32) {
 	w.BrakingMS = 0
 	w.FollowMS = 0
 	w.UpdateCarsMS = 0
+	w.BrakingProfile = BrakingProfile{}
 
 	graphStart := time.Now()
 	vehicleCounts := BuildVehicleCounts(w.Cars)
@@ -437,8 +480,9 @@ func (w *World) Step(dt float32) {
 	w.GraphBuildMS += sinceMS(graphStart)
 
 	brakingStart := time.Now()
-	brakingDecisions, holdSpeedDecisions, debugBlameLinks, holdBlameLinks := computeBrakingDecisions(w.Cars, allGraph)
+	brakingDecisions, holdSpeedDecisions, debugBlameLinks, holdBlameLinks, brakingProfile := computeBrakingDecisions(w.Cars, allGraph)
 	w.BrakingMS = sinceMS(brakingStart)
+	w.BrakingProfile = brakingProfile
 
 	followStart := time.Now()
 	followCaps := computeFollowingSpeedCaps(w.Cars, allGraph)
@@ -1258,18 +1302,21 @@ func recentlyLeft(car Car, splineID int) bool {
 	return splineID >= 0 && (car.PrevSplineIDs[0] == splineID || car.PrevSplineIDs[1] == splineID)
 }
 
-func computeBrakingDecisions(cars []Car, graph *RoadGraph) ([]bool, []bool, []DebugBlameLink, []DebugBlameLink) {
+func computeBrakingDecisions(cars []Car, graph *RoadGraph) ([]bool, []bool, []DebugBlameLink, []DebugBlameLink, BrakingProfile) {
 	flags := make([]bool, len(cars))
 	holdSpeed := make([]bool, len(cars))
 	initialBlame := make([]bool, len(cars))
 	tentativeLinks := make([]DebugBlameLink, 0)
 	holdLinks := make([]DebugBlameLink, 0)
+	profile := BrakingProfile{Cars: len(cars)}
 	if len(cars) < 2 {
-		return flags, holdSpeed, tentativeLinks, holdLinks
+		return flags, holdSpeed, tentativeLinks, holdLinks, profile
 	}
 
+	basePredictStart := time.Now()
 	predictions := make([][]TrajectorySample, len(cars))
 	stationaryPredictions := make([][]TrajectorySample, len(cars))
+	geometries := buildCollisionGeometries(cars)
 	poses := make([]carPose, len(cars))
 	reach := make([]float32, len(cars))
 	for i, car := range cars {
@@ -1284,7 +1331,11 @@ func computeBrakingDecisions(cars []Car, graph *RoadGraph) ([]bool, []bool, []De
 		reach[i] = maxf(car.Speed, 0)*predictionHorizonSeconds + 0.5*car.Accel*predictionHorizonSeconds*predictionHorizonSeconds +
 			physicalSize + collisionBroadPhaseSlackM
 		predictions[i] = predictCarTrajectory(car, graph, predictionHorizonSeconds, predictionStepSeconds)
+		profile.BasePredictions++
+		profile.TotalPredictions++
+		profile.TotalPredictionSamples += len(predictions[i])
 	}
+	profile.BasePredictMS = sinceMS(basePredictStart)
 
 	var maxReach float32
 	for _, r := range reach {
@@ -1302,6 +1353,7 @@ func computeBrakingDecisions(cars []Car, graph *RoadGraph) ([]bool, []bool, []De
 		}
 	}
 
+	conflictScanStart := time.Now()
 	seen := make(map[[2]int]bool, len(cars)*4)
 	neighborBuf := make([]int, 0, 32)
 	for i := 0; i < len(cars); i++ {
@@ -1317,14 +1369,18 @@ func computeBrakingDecisions(cars []Car, graph *RoadGraph) ([]bool, []bool, []De
 				continue
 			}
 			seen[[2]int{i, j}] = true
+			profile.PrimaryPairCandidates++
 			broadPhaseDist := reach[i] + reach[j]
 			if distSq(poses[i].pos, poses[j].pos) > broadPhaseDist*broadPhaseDist {
 				continue
 			}
-			collision, ok := predictCollision(predictions[i], predictions[j], cars[i], cars[j])
+			profile.PrimaryBroadPhasePairs++
+			profile.PrimaryCollisionChecks++
+			collision, ok := predictCollision(predictions[i], predictions[j], geometries[i], geometries[j])
 			if !ok {
 				continue
 			}
+			profile.PrimaryCollisionHits++
 			blameI, blameJ := determineBlame(collision, cars[i], cars[j], graph.splines)
 			alreadyCollided := collision.AlreadyCollided
 			if blameI && recentlyLeft(cars[i], cars[j].CurrentSplineID) {
@@ -1338,8 +1394,13 @@ func computeBrakingDecisions(cars []Car, graph *RoadGraph) ([]bool, []bool, []De
 					sc := cars[i]
 					sc.Speed = 0
 					stationaryPredictions[i] = predictCarTrajectory(sc, graph, predictionHorizonSeconds, predictionStepSeconds)
+					profile.StationaryPredictions++
+					profile.TotalPredictions++
+					profile.TotalPredictionSamples += len(stationaryPredictions[i])
 				}
-				if _, still := predictCollision(stationaryPredictions[i], predictions[j], cars[i], cars[j]); still {
+				profile.StationaryCollisionChecks++
+				if _, still := predictCollision(stationaryPredictions[i], predictions[j], geometries[i], geometries[j]); still {
+					profile.StationaryCollisionHits++
 					blameI = false
 				}
 			}
@@ -1348,31 +1409,46 @@ func computeBrakingDecisions(cars []Car, graph *RoadGraph) ([]bool, []bool, []De
 					sc := cars[j]
 					sc.Speed = 0
 					stationaryPredictions[j] = predictCarTrajectory(sc, graph, predictionHorizonSeconds, predictionStepSeconds)
+					profile.StationaryPredictions++
+					profile.TotalPredictions++
+					profile.TotalPredictionSamples += len(stationaryPredictions[j])
 				}
-				if _, still := predictCollision(stationaryPredictions[j], predictions[i], cars[j], cars[i]); still {
+				profile.StationaryCollisionChecks++
+				if _, still := predictCollision(stationaryPredictions[j], predictions[i], geometries[j], geometries[i]); still {
+					profile.StationaryCollisionHits++
 					blameJ = false
 				}
 			}
 			if blameI {
+				if !initialBlame[i] {
+					profile.InitiallyBlamedCars++
+				}
 				initialBlame[i] = true
 				tentativeLinks = append(tentativeLinks, DebugBlameLink{FromCarIndex: i, ToCarIndex: j})
 			}
 			if blameJ {
+				if !initialBlame[j] {
+					profile.InitiallyBlamedCars++
+				}
 				initialBlame[j] = true
 				tentativeLinks = append(tentativeLinks, DebugBlameLink{FromCarIndex: j, ToCarIndex: i})
 			}
 		}
 	}
+	profile.ConflictScanMS = sinceMS(conflictScanStart)
 
+	brakeProbeStart := time.Now()
 	for i := range cars {
 		if !initialBlame[i] {
 			continue
 		}
-		if shouldBrakeForBlamedConflicts(i, cars, graph, predictions, poses, reach, &grid) {
+		if shouldBrakeForBlamedConflicts(i, cars, graph, predictions, geometries, poses, reach, &grid, &profile) {
 			flags[i] = true
 		}
 	}
+	profile.BrakeProbeMS = sinceMS(brakeProbeStart)
 
+	holdProbeStart := time.Now()
 	for i, car := range cars {
 		if flags[i] || len(predictions[i]) == 0 {
 			continue
@@ -1383,6 +1459,9 @@ func computeBrakingDecisions(cars []Car, graph *RoadGraph) ([]bool, []bool, []De
 			continue
 		}
 		fasterPred := predictCarTrajectory(fasterCar, graph, predictionHorizonSeconds, predictionStepSeconds)
+		profile.FasterPredictions++
+		profile.TotalPredictions++
+		profile.TotalPredictionSamples += len(fasterPred)
 		if len(fasterPred) == 0 {
 			continue
 		}
@@ -1395,10 +1474,12 @@ func computeBrakingDecisions(cars []Car, graph *RoadGraph) ([]bool, []bool, []De
 			if distSq(poses[i].pos, poses[j].pos) > broadPhaseDist*broadPhaseDist {
 				continue
 			}
-			collision, ok := predictCollision(fasterPred, predictions[j], fasterCar, cars[j])
+			profile.HoldCollisionChecks++
+			collision, ok := predictCollision(fasterPred, predictions[j], geometries[i], geometries[j])
 			if !ok {
 				continue
 			}
+			profile.HoldCollisionHits++
 			blameI, _ := determineBlame(collision, fasterCar, cars[j], graph.splines)
 			if blameI && !recentlyLeft(fasterCar, cars[j].CurrentSplineID) {
 				if collision.AlreadyCollided {
@@ -1410,16 +1491,24 @@ func computeBrakingDecisions(cars []Car, graph *RoadGraph) ([]bool, []bool, []De
 					sc := cars[i]
 					sc.Speed = 0
 					stationaryPredictions[i] = predictCarTrajectory(sc, graph, predictionHorizonSeconds, predictionStepSeconds)
+					profile.StationaryPredictions++
+					profile.TotalPredictions++
+					profile.TotalPredictionSamples += len(stationaryPredictions[i])
 				}
-				if _, still := predictCollision(stationaryPredictions[i], predictions[j], cars[i], cars[j]); !still {
+				profile.StationaryCollisionChecks++
+				if _, still := predictCollision(stationaryPredictions[i], predictions[j], geometries[i], geometries[j]); !still {
 					holdSpeed[i] = true
 					holdLinks = append(holdLinks, DebugBlameLink{FromCarIndex: i, ToCarIndex: j})
 					break
+				} else {
+					profile.StationaryCollisionHits++
 				}
 			}
 		}
 	}
+	profile.HoldProbeMS = sinceMS(holdProbeStart)
 
+	finalizeStart := time.Now()
 	released := detectDeadlockReleases(len(cars), tentativeLinks, holdLinks, flags, holdSpeed)
 	for i := range released {
 		if !released[i] {
@@ -1441,11 +1530,22 @@ func computeBrakingDecisions(cars []Car, graph *RoadGraph) ([]bool, []bool, []De
 			activeHoldLinks = append(activeHoldLinks, link)
 		}
 	}
+	for _, flagged := range flags {
+		if flagged {
+			profile.BrakingCars++
+		}
+	}
+	for _, held := range holdSpeed {
+		if held {
+			profile.HoldCars++
+		}
+	}
+	profile.FinalizeMS = sinceMS(finalizeStart)
 
-	return flags, holdSpeed, debugLinks, activeHoldLinks
+	return flags, holdSpeed, debugLinks, activeHoldLinks, profile
 }
 
-func shouldBrakeForBlamedConflicts(carIndex int, cars []Car, graph *RoadGraph, predictions [][]TrajectorySample, poses []carPose, reach []float32, grid *spatialGrid) bool {
+func shouldBrakeForBlamedConflicts(carIndex int, cars []Car, graph *RoadGraph, predictions [][]TrajectorySample, geometries []collisionGeometry, poses []carPose, reach []float32, grid *spatialGrid, profile *BrakingProfile) bool {
 	if carIndex < 0 || carIndex >= len(cars) {
 		return false
 	}
@@ -1472,10 +1572,15 @@ func shouldBrakeForBlamedConflicts(carIndex int, cars []Car, graph *RoadGraph, p
 		}
 
 		testPrediction := predictCarTrajectory(testCar, graph, predictionHorizonSeconds, predictionStepSeconds)
+		if profile != nil {
+			profile.EscapePredictions++
+			profile.TotalPredictions++
+			profile.TotalPredictionSamples += len(testPrediction)
+		}
 		if len(testPrediction) == 0 {
 			return true
 		}
-		if hasBlamedConflictWithPrediction(carIndex, testCar, testPrediction, cars, graph, predictions, poses, reach, grid) {
+		if hasBlamedConflictWithPrediction(carIndex, testCar, testPrediction, cars, graph, predictions, geometries, poses, reach, grid, profile) {
 			return true
 		}
 	}
@@ -1483,7 +1588,7 @@ func shouldBrakeForBlamedConflicts(carIndex int, cars []Car, graph *RoadGraph, p
 	return false
 }
 
-func hasBlamedConflictWithPrediction(carIndex int, testCar Car, testPrediction []TrajectorySample, cars []Car, graph *RoadGraph, predictions [][]TrajectorySample, poses []carPose, reach []float32, grid *spatialGrid) bool {
+func hasBlamedConflictWithPrediction(carIndex int, testCar Car, testPrediction []TrajectorySample, cars []Car, graph *RoadGraph, predictions [][]TrajectorySample, geometries []collisionGeometry, poses []carPose, reach []float32, grid *spatialGrid, profile *BrakingProfile) bool {
 	neighbors := grid.queryNeighbors(poses[carIndex].pos, nil)
 	for _, otherIndex := range neighbors {
 		if otherIndex == carIndex || otherIndex >= len(predictions) || len(predictions[otherIndex]) == 0 {
@@ -1498,9 +1603,15 @@ func hasBlamedConflictWithPrediction(carIndex int, testCar Car, testPrediction [
 			continue
 		}
 
-		collision, ok := predictCollision(testPrediction, predictions[otherIndex], testCar, otherCar)
+		if profile != nil {
+			profile.EscapeCollisionChecks++
+		}
+		collision, ok := predictCollision(testPrediction, predictions[otherIndex], geometries[carIndex], geometries[otherIndex])
 		if !ok {
 			continue
+		}
+		if profile != nil {
+			profile.EscapeCollisionHits++
 		}
 
 		blameTestCar, _ := determineBlame(collision, testCar, otherCar, graph.splines)
@@ -1697,29 +1808,13 @@ func predictCarTrajectory(car Car, graph *RoadGraph, horizon, step float32) []Tr
 	return samples
 }
 
-func predictCollision(aSamples, bSamples []TrajectorySample, carA, carB Car) (CollisionPrediction, bool) {
+func predictCollision(aSamples, bSamples []TrajectorySample, geomA, geomB collisionGeometry) (CollisionPrediction, bool) {
 	count := len(aSamples)
 	if len(bSamples) < count {
 		count = len(bSamples)
 	}
 	if count == 0 {
 		return CollisionPrediction{}, false
-	}
-
-	rA := collisionRadius(carA)
-	rB := collisionRadius(carB)
-	offsetsA := collisionCircleOffsets(carA)
-	offsetsB := collisionCircleOffsets(carB)
-
-	var rTA, rTB float32
-	var trailerOffsetsA, trailerOffsetsB []float32
-	if carA.Trailer.HasTrailer {
-		rTA = hitboxRadius(carA.Trailer.Width)
-		trailerOffsetsA = hitboxCircleOffsets(carA.Trailer.Length, carA.Trailer.Width)
-	}
-	if carB.Trailer.HasTrailer {
-		rTB = hitboxRadius(carB.Trailer.Width)
-		trailerOffsetsB = hitboxCircleOffsets(carB.Trailer.Length, carB.Trailer.Width)
 	}
 
 	checkCircleGroups := func(cenA, hA Vec2, offsA []float32, rA float32, cenB, hB Vec2, offsB []float32, rB float32) bool {
@@ -1735,15 +1830,7 @@ func predictCollision(aSamples, bSamples []TrajectorySample, carA, carB Car) (Co
 		return false
 	}
 
-	coarseRA := carA.Length/2 + 1.0
-	if carA.Trailer.HasTrailer {
-		coarseRA += carA.Trailer.Length + 1.0
-	}
-	coarseRB := carB.Length/2 + 1.0
-	if carB.Trailer.HasTrailer {
-		coarseRB += carB.Trailer.Length + 1.0
-	}
-	coarseDistSq := (coarseRA + coarseRB) * (coarseRA + coarseRB)
+	coarseDistSq := (geomA.coarseRadius + geomB.coarseRadius) * (geomA.coarseRadius + geomB.coarseRadius)
 
 	for i := 0; i < count; i++ {
 		pA, hA := aSamples[i].Position, aSamples[i].Heading
@@ -1752,15 +1839,15 @@ func predictCollision(aSamples, bSamples []TrajectorySample, carA, carB Car) (Co
 			continue
 		}
 
-		collides := checkCircleGroups(pA, hA, offsetsA, rA, pB, hB, offsetsB, rB)
+		collides := checkCircleGroups(pA, hA, geomA.bodyOffsets, geomA.bodyRadius, pB, hB, geomB.bodyOffsets, geomB.bodyRadius)
 		if !collides && aSamples[i].HasTrailer {
-			collides = checkCircleGroups(aSamples[i].TrailerPosition, aSamples[i].TrailerHeading, trailerOffsetsA, rTA, pB, hB, offsetsB, rB)
+			collides = checkCircleGroups(aSamples[i].TrailerPosition, aSamples[i].TrailerHeading, geomA.trailerOffsets, geomA.trailerRadius, pB, hB, geomB.bodyOffsets, geomB.bodyRadius)
 		}
 		if !collides && bSamples[i].HasTrailer {
-			collides = checkCircleGroups(pA, hA, offsetsA, rA, bSamples[i].TrailerPosition, bSamples[i].TrailerHeading, trailerOffsetsB, rTB)
+			collides = checkCircleGroups(pA, hA, geomA.bodyOffsets, geomA.bodyRadius, bSamples[i].TrailerPosition, bSamples[i].TrailerHeading, geomB.trailerOffsets, geomB.trailerRadius)
 		}
 		if !collides && aSamples[i].HasTrailer && bSamples[i].HasTrailer {
-			collides = checkCircleGroups(aSamples[i].TrailerPosition, aSamples[i].TrailerHeading, trailerOffsetsA, rTA, bSamples[i].TrailerPosition, bSamples[i].TrailerHeading, trailerOffsetsB, rTB)
+			collides = checkCircleGroups(aSamples[i].TrailerPosition, aSamples[i].TrailerHeading, geomA.trailerOffsets, geomA.trailerRadius, bSamples[i].TrailerPosition, bSamples[i].TrailerHeading, geomB.trailerOffsets, geomB.trailerRadius)
 		}
 		if !collides {
 			continue
@@ -3196,6 +3283,28 @@ func hitboxCircleOffsets(length, width float32) []float32 {
 		offsets[i] = start + float32(i)*step
 	}
 	return offsets
+}
+
+func buildCollisionGeometry(car Car) collisionGeometry {
+	geom := collisionGeometry{
+		bodyRadius:   collisionRadius(car),
+		bodyOffsets:  collisionCircleOffsets(car),
+		coarseRadius: car.Length/2 + 1.0,
+	}
+	if car.Trailer.HasTrailer {
+		geom.trailerRadius = hitboxRadius(car.Trailer.Width)
+		geom.trailerOffsets = hitboxCircleOffsets(car.Trailer.Length, car.Trailer.Width)
+		geom.coarseRadius += car.Trailer.Length + 1.0
+	}
+	return geom
+}
+
+func buildCollisionGeometries(cars []Car) []collisionGeometry {
+	geometries := make([]collisionGeometry, len(cars))
+	for i, car := range cars {
+		geometries[i] = buildCollisionGeometry(car)
+	}
+	return geometries
 }
 
 func collisionRadius(car Car) float32          { return hitboxRadius(car.Width) }
