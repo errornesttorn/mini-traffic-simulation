@@ -1,6 +1,6 @@
-# Traffic Sim
+# Simple traffic simulation
 
-`traffic_sim` is a small Go traffic simulator with an interactive road editor. It is aimed at people who want to sketch road layouts quickly, define traffic flows, and watch cars and buses move through the network without building a full game or transport stack first.
+`simple-traffic-simulation` is a small Go traffic simulator with an interactive road editor. It is aimed at people who want to sketch road layouts quickly, define traffic flows, and watch cars and buses move through the network without building a full game or transport stack first.
 
 The entire project has been vibecoded in a week, but is pretty good nonetheless.
 
@@ -103,24 +103,6 @@ Vehicle behavior is driven by several layers:
 - lane changes are modeled as temporary bridging splines between coupled lanes
 
 The result is not a full microscopic traffic research simulator, but it is detailed enough to explore merges, overtakes, bus stops, intersections, roundabouts, and signal timing on hand-drawn maps.
-
-## Scenario Files
-
-Saved scenarios are JSON. The main top-level sections are:
-
-- `splines`
-- `routes`
-- `cars`
-- `traffic_lights`
-- `traffic_cycles`
-
-The easiest way to understand the format is to save a small map from the editor and inspect the JSON, or start from a file in [`examples`](./examples).
-
-There is also a small helper script for duplicating a scenario into a grid:
-
-```bash
-python3 tile_map.py examples/roundabout.json tiled.json --cols 3 --rows 3 --spacing 800
-```
 
 ## Building On Top Of `sim`
 
