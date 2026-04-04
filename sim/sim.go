@@ -489,14 +489,15 @@ func (w *World) Step(dt float32) {
 	w.FollowMS = sinceMS(followStart)
 
 	updateCarsStart := time.Now()
-	w.Cars = updateCars(w.Cars, w.Routes, allGraph, brakingDecisions, holdSpeedDecisions, followCaps, w.TrafficLights, w.TrafficCycles, dt)
+	var indexRemap []int
+	w.Cars, indexRemap = updateCars(w.Cars, w.Routes, allGraph, brakingDecisions, holdSpeedDecisions, followCaps, w.TrafficLights, w.TrafficCycles, dt)
 	w.LaneChangeSplines = gcLaneChangeSplines(w.LaneChangeSplines, w.Cars)
 	w.Routes, w.Cars = updateRouteSpawning(w.Routes, w.Cars, w.Splines, dt)
 	w.TrafficCycles = UpdateTrafficCycles(w.TrafficCycles, dt)
 	w.UpdateCarsMS = sinceMS(updateCarsStart)
 
-	w.DebugBlameLinks = debugBlameLinks
-	w.HoldBlameLinks = holdBlameLinks
+	w.DebugBlameLinks = remapBlameLinks(debugBlameLinks, indexRemap)
+	w.HoldBlameLinks = remapBlameLinks(holdBlameLinks, indexRemap)
 	w.BasePathHits = baseGraph.pathCacheHits
 	w.BasePathMisses = baseGraph.pathCacheMisses
 	w.AllPathHits = allGraph.pathCacheHits
@@ -1545,6 +1546,25 @@ func computeBrakingDecisions(cars []Car, graph *RoadGraph) ([]bool, []bool, []De
 	return flags, holdSpeed, debugLinks, activeHoldLinks, profile
 }
 
+func remapBlameLinks(links []DebugBlameLink, remap []int) []DebugBlameLink {
+	if len(remap) == 0 {
+		return links
+	}
+	out := make([]DebugBlameLink, 0, len(links))
+	for _, link := range links {
+		if link.FromCarIndex < 0 || link.FromCarIndex >= len(remap) || link.ToCarIndex < 0 || link.ToCarIndex >= len(remap) {
+			continue
+		}
+		newFrom := remap[link.FromCarIndex]
+		newTo := remap[link.ToCarIndex]
+		if newFrom < 0 || newTo < 0 {
+			continue
+		}
+		out = append(out, DebugBlameLink{FromCarIndex: newFrom, ToCarIndex: newTo})
+	}
+	return out
+}
+
 func shouldBrakeForBlamedConflicts(carIndex int, cars []Car, graph *RoadGraph, predictions [][]TrajectorySample, geometries []collisionGeometry, poses []carPose, reach []float32, grid *spatialGrid, profile *BrakingProfile) bool {
 	if carIndex < 0 || carIndex >= len(cars) {
 		return false
@@ -2095,9 +2115,9 @@ func computeFollowingSpeedCaps(cars []Car, graph *RoadGraph) []float32 {
 	return caps
 }
 
-func updateCars(cars []Car, routes []Route, graph *RoadGraph, brakingDecisions []bool, holdSpeedDecisions []bool, followCaps []float32, lights []TrafficLight, cycles []TrafficCycle, dt float32) []Car {
+func updateCars(cars []Car, routes []Route, graph *RoadGraph, brakingDecisions []bool, holdSpeedDecisions []bool, followCaps []float32, lights []TrafficLight, cycles []TrafficCycle, dt float32) ([]Car, []int) {
 	if len(cars) == 0 {
-		return cars
+		return cars, nil
 	}
 
 	routeIndexByID := map[int]int{}
@@ -2105,6 +2125,10 @@ func updateCars(cars []Car, routes []Route, graph *RoadGraph, brakingDecisions [
 		routeIndexByID[route.ID] = i
 	}
 
+	indexRemap := make([]int, len(cars))
+	for i := range indexRemap {
+		indexRemap[i] = -1
+	}
 	alive := cars[:0]
 	for i, car := range cars {
 		routeIdx, ok := routeIndexByID[car.RouteID]
@@ -2124,6 +2148,7 @@ func updateCars(cars []Car, routes []Route, graph *RoadGraph, brakingDecisions [
 			car.Speed = 0
 			car.Braking = false
 			car.SoftSlowing = false
+			indexRemap[i] = len(alive)
 			alive = append(alive, car)
 			continue
 		}
@@ -2169,6 +2194,7 @@ func updateCars(cars []Car, routes []Route, graph *RoadGraph, brakingDecisions [
 			}
 			if shouldBeginBusStopDwell(car, route, currentSpline, graph) {
 				beginBusStopDwell(route, &car)
+				indexRemap[i] = len(alive)
 				alive = append(alive, car)
 				break
 			}
@@ -2258,6 +2284,7 @@ func updateCars(cars []Car, routes []Route, graph *RoadGraph, brakingDecisions [
 				if shouldBeginBusStopDwell(car, route, currentSpline, graph) {
 					beginBusStopDwell(route, &car)
 				}
+				indexRemap[i] = len(alive)
 				alive = append(alive, car)
 				break
 			}
@@ -2321,7 +2348,7 @@ func updateCars(cars []Car, routes []Route, graph *RoadGraph, brakingDecisions [
 			}
 		}
 	}
-	return alive
+	return alive, indexRemap
 }
 
 func laneChangeFeasibleAt(src, dst Spline, distance, speed float32) bool {
