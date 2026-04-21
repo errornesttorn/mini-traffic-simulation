@@ -69,9 +69,14 @@ const (
 	curveSpeedIntervalM       float32 = 10.0
 	maxLateralAccelMPS2       float32 = 5.0
 	collisionBroadPhaseSlackM float32 = 5.0
-	frontPivotFrac            float32 = 0.20
-	rearPivotFrac             float32 = 0.80
-	wheelbaseFrac             float32 = rearPivotFrac - frontPivotFrac
+	// The car is modelled as a front pivot that rides exactly on the spline
+	// offset by LateralOffset, and a rear point dragged behind it at
+	// Length * wheelbaseFrac. Trailers hitch to the rear point using the
+	// same scheme. predictCarTrajectory carries simRearPos as mutable state
+	// because its lag produces the body heading (not just the spline tangent).
+	frontPivotFrac float32 = 0.20
+	rearPivotFrac  float32 = 0.80
+	wheelbaseFrac  float32 = rearPivotFrac - frontPivotFrac
 )
 
 type Vec2 struct {
@@ -889,6 +894,12 @@ func buildMergedRoadGraphFromTopology(base *roadGraphTopology, temporary []Splin
 	}, vehicleCounts)
 }
 
+// permanentRoadGraphTopology returns the cached adjacency built from
+// w.Splines, rebuilding it only when the topology actually changed. The
+// cache key intentionally includes the slice backing address as well as
+// a content hash: replacing w.Splines with a fresh slice must invalidate
+// the cache even if the splines happen to hash the same, because the
+// cached topology holds *Spline pointers into the old backing array.
 func (w *World) permanentRoadGraphTopology() *roadGraphTopology {
 	key := splineTopologyKey(w.Splines)
 	addr := splineSliceAddr(w.Splines)
@@ -910,6 +921,12 @@ func (w *World) permanentRoadGraphTopology() *roadGraphTopology {
 	return w.permanentGraphTopology
 }
 
+// Step advances the world by dt seconds. Order here is load-bearing:
+// lane-change bridges are generated before braking so the braking kernel
+// sees the merged graph (permanent topology + transient bridges); braking
+// and following caps run in parallel because they read the same snapshot
+// and write to disjoint outputs; updateCars is last because it integrates
+// positions using those outputs. See AGENTS.md for the full pipeline.
 func (w *World) Step(dt float32) {
 	stepStart := time.Now()
 	w.RouteVisualsMS = 0
@@ -2047,6 +2064,11 @@ func computeBrakingDecisions(cars []Car, graph *RoadGraph, debugSelectedCar int,
 					if blameJ && recentlyLeft(cars[j], cars[i].CurrentSplineID) {
 						blameJ = false
 					}
+					// Stationary exoneration: if car i would still collide with j
+					// even by stopping dead, then i is not actually the cause — it's
+					// already where it should be and j is driving into it. Clearing
+					// blameI here is what stops long queues from cascading into
+					// "everyone brakes for everyone ahead".
 					if blameI && !alreadyCollided {
 						if r.stationaryPredictions[i] == nil {
 							sc := cars[i]
@@ -2429,6 +2451,12 @@ func hasBlamedConflictWithPrediction(carIndex int, testCar Car, testPrediction [
 	return false
 }
 
+// detectDeadlockReleases finds short blame cycles (length ≤ 4) in the
+// "A is blamed for blocking B" graph and picks one car per cycle to
+// release (clear its brake AND hold flags). The victim is the cycle
+// member with the lowest car index — arbitrary but deterministic, which
+// matters for reproducibility. Without this, a symmetric four-way yield
+// at an intersection would gridlock indefinitely.
 func detectDeadlockReleases(numCars int, brakeLinks, holdLinks []DebugBlameLink, braking []bool, holdSpeed []bool) []bool {
 	if numCars <= 1 {
 		return nil
@@ -3419,6 +3447,15 @@ func isLaneChangeLandingSafe(p3Dist float32, destSplineID int, switchingCar Car,
 	return true
 }
 
+// buildLaneChangeBridge synthesises a cubic Bezier that peels off the
+// current spline and lands on destSplineID ~halfDist ahead of the nearest
+// projection. P1 is halfDist forward along the current heading, P2 is
+// halfDist back from P3 along the destination heading — this keeps the
+// curve C1-continuous at both ends. The bridge is appended to lcs and
+// the car is switched onto it; car.AfterSplineID/AfterSplineDist tell
+// updateCars where to land when the bridge runs out. Returns lcs unchanged
+// and false if no viable landing exists (not enough room, wrong heading,
+// or too slow unless forced).
 func buildLaneChangeBridge(car *Car, destSplineID int, splines []Spline, splineIndexByID map[int]int, lcs []Spline, nextID *int, forced bool) ([]Spline, bool) {
 	srcIdx, ok := splineIndexByID[car.CurrentSplineID]
 	if !ok {
@@ -3468,6 +3505,20 @@ func buildLaneChangeBridge(car *Car, destSplineID int, splines []Spline, splineI
 	return lcs, true
 }
 
+// computeLaneChanges decides, for each car not already mid-change, whether
+// to start a new lane change. Three triggers, in this order:
+//   1. DesiredLaneSplineID set (forced — usually because pathfinding says
+//      the only route to the destination runs through a coupled sibling
+//      lane). If the forced deadline has arrived, the bridge is built even
+//      if it's geometrically tight.
+//   2. Preference-based: every preferenceChangeCooldownS seconds, look at
+//      HardCoupled+SoftCoupled siblings with a lower LanePreference and
+//      consider switching if the path cost penalty is bounded.
+//   3. Overtake: if the car has been stuck below its preferred speed for
+//      longer than overtakeSlowThresholdS behind a slower leader, try to
+//      jump to a sibling lane.
+// Every candidate goes through laneChangeLandingDist + isLaneChangeLandingSafe
+// before a bridge is synthesised.
 func computeLaneChanges(cars []Car, splines []Spline, lcs []Spline, nextID *int, graph *RoadGraph, dt float32) ([]Spline, []Car) {
 	splineIndexByID := graph.indexByID
 	poses := make([]carPose, len(cars))
@@ -3671,6 +3722,11 @@ func findOvertakeLaneCandidates(car Car, splines []Spline, splineIndexByID map[i
 	return candidates
 }
 
+// cacheSpline populates the sampled-lookup tables that the rest of the
+// code assumes exist: Samples, SampleTangents, SampleCurv, CumLen are all
+// length simSamples+1; Length and CurveSpeedMPS/TravelTimeS are derived
+// from them. Any edit to P0..P3, SpeedLimitKmh, etc. MUST be followed by
+// a RebuildSpline call or these tables will desync from the geometry.
 func cacheSpline(s *Spline) {
 	if len(s.SampleTangents) != simSamples+1 {
 		s.SampleTangents = make([]Vec2, simSamples+1)
@@ -3971,6 +4027,12 @@ func buildRouteTree(graph *RoadGraph, destIdx int, vehicleKind VehicleKind) rout
 	return routeTreeEntry{costs: costs, nextHop: nextHop}
 }
 
+// routeTree returns a cached Dijkstra tree on the reverse graph rooted at
+// destinationSplineID. Every call that needs "what's the next spline from
+// X toward Y for vehicle kind Z" hits this cache; on a miss it runs full
+// Dijkstra. The cache lives on RoadGraph so it's discarded whenever the
+// graph is rebuilt (which happens each Step — that's also why the per-frame
+// rebuild reuses the cached permanent topology underneath).
 func (g *RoadGraph) routeTree(destinationSplineID int, vehicleKind VehicleKind) (routeTreeEntry, bool) {
 	if g == nil || len(g.splines) == 0 {
 		return routeTreeEntry{}, false
@@ -4603,6 +4665,10 @@ func floorf32(v float32) int32 {
 	return i
 }
 
+// NodeKey quantizes a world position to 1/100 units so spline endpoints
+// can be bucketed into a map. Two splines are "connected" iff their
+// endpoint keys are exactly equal — there is no float tolerance. The
+// editor is responsible for snapping endpoints to the same key.
 type NodeKey [2]int32
 
 func nodeKeyFromVec2(v Vec2) NodeKey {

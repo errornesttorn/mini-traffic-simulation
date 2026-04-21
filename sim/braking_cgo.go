@@ -224,6 +224,12 @@ func buildBrakingCGraphCache(graph *RoadGraph) *brakingCGraphCache {
 	}
 }
 
+// cachedBrakingCGraph returns the marshalled C-side graph for `graph`,
+// rebuilding only when the topology hash changes. The graph rarely changes
+// at runtime (only when the user edits splines) but the marshal is expensive
+// (hundreds of CSpline structs), so this cache is load-bearing for frame
+// times on large maps. The caller must hold brakingGraphMarshalCache.mu —
+// the cache owns a single C allocation shared across all callers.
 func cachedBrakingCGraph(graph *RoadGraph) *brakingCGraphCache {
 	key := brakingGraphTopologyKey(graph)
 	if brakingGraphMarshalCache.graph != nil && brakingGraphMarshalCache.graph.key == key {

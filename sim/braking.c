@@ -60,7 +60,11 @@ static CVec2 bezier_point(CVec2 p0, CVec2 p1, CVec2 p2, CVec2 p3, float t) {
         uuu*p0.y + 3*uu*t*p1.y + 3*u*tt*p2.y + ttt*p3.y);
 }
 
-/* Binary/linear search in cumulative length array */
+/* Find the sample index whose cum_len[i-1..i] brackets `distance`.
+ * When cursor_spline_id points at the same spline the previous call used,
+ * we do a short linear scan from the last index — this is O(1) amortised
+ * during trajectory prediction where `distance` grows monotonically.
+ * Cold callers pass NULL cursors and get a binary search. */
 static int spline_segment_index(const CSpline *s, float distance, int *cursor_spline_id, int *cursor_idx) {
     if (s->length <= 0) return 0;
     if (cursor_spline_id && *cursor_spline_id == s->id) {
@@ -211,6 +215,12 @@ static RouteHeapItem route_heap_pop(RouteHeap *h) {
     return out;
 }
 
+/* Builds a Dijkstra tree on the REVERSE graph rooted at destination_spline_id.
+ * After this, costs[i] = travel-time estimate from spline i to the destination
+ * and next_hop[i] = which successor to take next from i. This single tree
+ * answers "what should car X on spline Y do next?" in O(1). We build one tree
+ * per (destination, vehicle_kind) pair in parallel each frame; cars sharing
+ * a destination share a tree. Bus-only splines are pruned for cars here. */
 static CRouteTree build_route_tree(const CGraph *g, int destination_spline_id, int vehicle_kind) {
     int n = g->num_splines;
     int alloc_n = n > 0 ? n : 1;
@@ -679,6 +689,17 @@ static int normal_car_occupies_priority_spline(const CCar *car, int prio_spline_
     return car_hitbox_touches_spline(car, ps, g);
 }
 
+/* Decide who yields in a predicted collision. In priority order:
+ *   1. Already collided (overlap at t=0): if nearly head-on, nobody is
+ *      blamed — they're physically locked; brake/hold won't help. Otherwise
+ *      the rear car takes blame.
+ *   2. Different priority splines: the non-priority car yields, unless the
+ *      priority car is somehow still inside the other's priority spline
+ *      (e.g. stuck mid-intersection) in which case blame flips.
+ *   3. Shallow-angle (< 45°, like a rear-end): rear car is blamed.
+ *   4. Wide-angle crossing: "yield to the right" — the car on the left blames.
+ * The caller is free to exonerate either side afterwards (stationary
+ * exoneration, recently-left filter). */
 static void determine_blame(const CCollisionPred *c, const CCar *a, const CCar *b,
                             const CGraph *g, int *blame_a, int *blame_b) {
     *blame_a = 0; *blame_b = 0;
@@ -709,6 +730,12 @@ static void determine_blame(const CCollisionPred *c, const CCar *a, const CCar *
    Closing rate scale & recently-left
    ═══════════════════════════════════════════════════════════════════ */
 
+/* Shrinks the broad-phase pair distance based on whether the two cars are
+ * approaching (+1) or separating (-1). Scale ranges over [0.30, 1.00]:
+ * pairs moving apart are less likely to collide within the horizon, so we
+ * can skip cheaply. The 0.65 + 0.35*ratio mapping was tuned empirically —
+ * changing it shifts the pair-candidate / collision-check ratio in the
+ * profile. */
 static inline float closing_rate_scale(CVec2 disp, float d_sq,
                                        CVec2 hi, CVec2 hj,
                                        float si, float sj) {
@@ -905,6 +932,11 @@ static float median_reach(const float *reach, int n) {
    Deadlock detection
    ═══════════════════════════════════════════════════════════════════ */
 
+/* Find short cycles (≤ DEADLOCK_MAX_PATH hops) in the blame graph and
+ * pick one car per cycle to release (clear both flags). Release victim
+ * is the lowest-index member — arbitrary but deterministic across frames.
+ * This is what lets a 4-way gridlock resolve: one car goes, the rest
+ * re-evaluate next frame. DFS is iterative to avoid stack blow-up. */
 static void detect_deadlock_releases(int num_cars,
                                      const CBlameLink *brake_links, int n_brake,
                                      const CBlameLink *hold_links, int n_hold,
@@ -1035,6 +1067,12 @@ static int has_blamed_conflict(int ci, const CCar *test_car,
     return 0;
 }
 
+/* Brake-escape probe: a car was blamed for a predicted collision under its
+ * current speed — but maybe it can *accelerate* out of the conflict instead.
+ * Re-predict its trajectory at speed+accel*dt for a couple of short dt's,
+ * and if at some probed speed the predicted conflict disappears, return 0
+ * (don't brake). If even the probes still collide, return 1 (actually brake).
+ * Near-max-speed cars skip the probe: they can't meaningfully accelerate. */
 static int should_brake_for_blamed(int ci, const CCar *cars, int num_cars,
                                    const CGraph *g, const CRouteTree *trees,
                                    const CTrajSample *all_traj, const int *traj_lens,
@@ -1078,8 +1116,12 @@ static int should_brake_for_blamed(int ci, const CCar *cars, int num_cars,
    Shared stationary prediction (atomic compute-once)
    ═══════════════════════════════════════════════════════════════════ */
 
-/* Atomically compute stationary prediction for car k.
-   Returns 1 if this call actually computed it (for profiling). */
+/* Atomically compute the "what if car k stopped dead?" trajectory, exactly
+ * once, even when multiple OMP threads race to ask for it. stat_lock[k] is
+ * a tri-state: 0=nobody has it, 1=someone is computing, 2=ready to read.
+ * Whoever wins the CAS to 1 computes and publishes with a release store;
+ * losers spin on an acquire load until they see 2. Returns 1 iff *this*
+ * call did the computation (for profiling — not for correctness). */
 static int ensure_stationary_pred(int k, const CCar *cars, const CGraph *g,
                                   const CRouteTree *trees,
                                   CTrajSample *stat_traj, int *stat_lens,
@@ -1116,6 +1158,10 @@ typedef struct {
     int hold_checks, hold_hits, stat_checks, stat_hits;
 } HoldResult;
 
+/* Hold-speed probe: for a car that is NOT braking, would accelerating by
+ * 0.25s * accel cause a new conflict? If yes, set should_hold: the car
+ * keeps its current speed but doesn't accelerate further. This is what
+ * keeps a following car from closing a gap that it's about to need. */
 static HoldResult compute_hold_for_car(int ci, const CCar *cars, int num_cars,
                                        const CGraph *g, const CRouteTree *trees,
                                        const int *flags,
@@ -1226,6 +1272,22 @@ static double now_ms(void) {
     return omp_get_wtime() * 1000.0;
 }
 
+/* Top-level braking pipeline. Stages, all OMP-parallel where marked:
+ *   1. Build one Dijkstra route tree per (destination, vehicle_kind).
+ *   2. Per-car base prediction: 3 s of trajectory + hitbox geometry + a
+ *      broad-phase "reach" radius.
+ *   3. Build per-trajectory AABBs and a spatial hash over car positions.
+ *   4. Conflict scan: for each pair i<j within 3x3 grid cells, cheap
+ *      closing-rate filter → AABB overlap → narrow-phase predict_collision
+ *      → determine_blame → stationary-exoneration. Writes tentative blame.
+ *   5. Brake probe: for every blamed car, run should_brake_for_blamed. If
+ *      it can accelerate out of the conflict, the brake flag stays 0.
+ *   6. Hold probe: for every NON-braking car, see if accelerating a bit
+ *      would introduce a new conflict; if so, mark hold_flags (coast).
+ *   7. Deadlock release: short cycles (≤ 4 hops) in the blame graph mean
+ *      nobody can move; clear both flags on the lowest-index member.
+ * Output: brake_flags[i] and hold_flags[i] for every car, plus debug link
+ * arrays when a specific car is selected for inspection in the editor. */
 void compute_braking_decisions(CBrakingCtx *ctx) {
     int N = ctx->num_cars;
     CBrakingProfile *prof = &ctx->profile;
