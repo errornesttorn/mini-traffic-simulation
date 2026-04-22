@@ -80,6 +80,7 @@ const (
 	ToolReverse
 	ToolPriority
 	ToolCouple
+	ToolTurnLink
 	ToolSpeedLimit
 	ToolPreference
 	ToolRouteCars
@@ -633,6 +634,7 @@ var drawToolItems = []toolToolbarItem{
 var rulesToolItems = []toolToolbarItem{
 	{"P", "Priority", ToolPriority},
 	{"L", "Couple", ToolCouple},
+	{"N", "Turn", ToolTurnLink},
 	{"S", "Speed", ToolSpeedLimit},
 	{"V", "Prefer", ToolPreference},
 }
@@ -697,7 +699,7 @@ func modeForTool(tool EditorTool) EditorMode {
 	switch tool {
 	case ToolSpline, ToolQuadratic, ToolCut, ToolReverse:
 		return ModeDraw
-	case ToolPriority, ToolCouple, ToolSpeedLimit, ToolPreference:
+	case ToolPriority, ToolCouple, ToolTurnLink, ToolSpeedLimit, ToolPreference:
 		return ModeRules
 	case ToolRouteCars, ToolRouteBuses, ToolRouteEraser:
 		return ModeRoute
@@ -793,6 +795,7 @@ func main() {
 	routePanel := RoutePanel{}
 	routeStartSplineID := -1
 	coupleModeFirstID := -1
+	turnLinkModeFirstID := -1
 	debugMode := false
 	hitboxDebugMode := false
 	infoMode := false
@@ -825,6 +828,7 @@ func main() {
 		routePanel = RoutePanel{}
 		routeStartSplineID = -1
 		coupleModeFirstID = -1
+		turnLinkModeFirstID = -1
 	}
 
 	setTool := func(newTool EditorTool) {
@@ -906,6 +910,9 @@ func main() {
 		}
 		if rl.IsKeyPressed(rl.KeyL) {
 			setTool(ToolCouple)
+		}
+		if rl.IsKeyPressed(rl.KeyN) {
+			setTool(ToolTurnLink)
 		}
 		if rl.IsKeyPressed(rl.KeyC) {
 			setTool(ToolCut)
@@ -1231,6 +1238,18 @@ func main() {
 				}
 				if coupleNotice != "" {
 					noticeText = coupleNotice
+					noticeTimer = 3.0
+				}
+			case ToolTurnLink:
+				prevTurnFirst := turnLinkModeFirstID
+				var turnNotice string
+				turnLinkModeFirstID, splines, turnNotice = handleTurnLinkMode(turnLinkModeFirstID, splines, hoveredSpline)
+				if prevTurnFirst >= 0 && hoveredSpline >= 0 && splines[hoveredSpline].ID != prevTurnFirst &&
+					(rl.IsMouseButtonPressed(rl.MouseButtonLeft) || rl.IsMouseButtonPressed(rl.MouseButtonRight)) {
+					editorMutatedWorld = true
+				}
+				if turnNotice != "" {
+					noticeText = turnNotice
 					noticeTimer = 3.0
 				}
 			case ToolCut:
@@ -1687,6 +1706,9 @@ func main() {
 
 		if tool == ToolCouple {
 			drawCoupleMode(splines, coupleModeFirstID, hoveredSpline, camera.Zoom)
+		}
+		if tool == ToolTurnLink {
+			drawTurnLinkMode(splines, turnLinkModeFirstID, hoveredSpline, camera.Zoom)
 		}
 		if tool == ToolSpeedLimit {
 			drawSpeedLimitWorld(splines, hoveredSpline, camera.Zoom)
@@ -3550,6 +3572,72 @@ func handleCoupleMode(firstID int, splines []Spline, hoveredSpline int) (int, []
 	return -1, splines, ""
 }
 
+// handleTurnLinkMode wires clicks for the rules-mode turn-link tool. Left
+// click on a source spline, then left click on a successor to add a
+// right-turn link (source → target). A right-second-click makes it a
+// left-turn link. Clicking the same spline twice or pressing Escape cancels.
+// Clicking an already-linked pair with the same button toggles it off.
+func handleTurnLinkMode(firstID int, splines []Spline, hoveredSpline int) (int, []Spline, string) {
+	if rl.IsKeyPressed(rl.KeyEscape) {
+		return -1, splines, ""
+	}
+
+	leftClicked := rl.IsMouseButtonPressed(rl.MouseButtonLeft) && hoveredSpline >= 0
+	rightClicked := rl.IsMouseButtonPressed(rl.MouseButtonRight) && hoveredSpline >= 0
+	if !leftClicked && !rightClicked {
+		return firstID, splines, ""
+	}
+	clickedID := splines[hoveredSpline].ID
+
+	if firstID < 0 {
+		if leftClicked {
+			return clickedID, splines, ""
+		}
+		return firstID, splines, ""
+	}
+	if clickedID == firstID {
+		return -1, splines, ""
+	}
+
+	idxSrc := findSplineIndexByID(splines, firstID)
+	if idxSrc < 0 {
+		return -1, splines, ""
+	}
+	if leftClicked {
+		splines = toggleTurnLink(splines, idxSrc, clickedID, true)
+	} else {
+		splines = toggleTurnLink(splines, idxSrc, clickedID, false)
+	}
+	return -1, splines, ""
+}
+
+// toggleTurnLink flips a directional turn link from splines[idxSrc] to
+// targetID. right=true means right-turn; right=false means left-turn. A
+// source/target pair can only hold one direction at a time — toggling a
+// direction removes the opposite one first.
+func toggleTurnLink(splines []Spline, idxSrc int, targetID int, right bool) []Spline {
+	if idxSrc < 0 || idxSrc >= len(splines) {
+		return splines
+	}
+	var primary, other *[]int
+	if right {
+		primary = &splines[idxSrc].RightTurnLinkIDs
+		other = &splines[idxSrc].LeftTurnLinkIDs
+	} else {
+		primary = &splines[idxSrc].LeftTurnLinkIDs
+		other = &splines[idxSrc].RightTurnLinkIDs
+	}
+	for _, id := range *primary {
+		if id == targetID {
+			*primary = removeInt(*primary, targetID)
+			return splines
+		}
+	}
+	*other = removeInt(*other, targetID)
+	*primary = append(*primary, targetID)
+	return splines
+}
+
 func laneChangeFeasibleAt(src, dst Spline, distance, speed float32) bool {
 	carPos, carHeading := simpkg.SampleSplineAtDistance(src, distance)
 	halfDist := speed * laneChangeHalfSecs
@@ -3618,6 +3706,8 @@ func removeSplineFromCouplings(splines []Spline, deletedID int) []Spline {
 	for i := range splines {
 		splines[i].HardCoupledIDs = removeInt(splines[i].HardCoupledIDs, deletedID)
 		splines[i].SoftCoupledIDs = removeInt(splines[i].SoftCoupledIDs, deletedID)
+		splines[i].LeftTurnLinkIDs = removeInt(splines[i].LeftTurnLinkIDs, deletedID)
+		splines[i].RightTurnLinkIDs = removeInt(splines[i].RightTurnLinkIDs, deletedID)
 	}
 	return splines
 }
@@ -3628,6 +3718,11 @@ func reverseSpline(spline Spline) Spline {
 	reversed.BusOnly = spline.BusOnly
 	reversed.HardCoupledIDs = append([]int(nil), spline.HardCoupledIDs...)
 	reversed.SoftCoupledIDs = append([]int(nil), spline.SoftCoupledIDs...)
+	// Turn-link direction is conceptually tied to traffic flow, which a
+	// reversal inverts — so the list stops making sense on a reversed spline.
+	// Drop them; the user can re-author after a reverse.
+	reversed.LeftTurnLinkIDs = nil
+	reversed.RightTurnLinkIDs = nil
 	reversed.SpeedLimitKmh = spline.SpeedLimitKmh
 	reversed.LanePreference = spline.LanePreference
 	return reversed
@@ -3718,6 +3813,67 @@ func drawLaneChangeSplines(lcs []Spline, zoom float32) {
 		drawLineEx(s.P3, s.P2, armThick, dimColor)
 		drawCircleV(s.P1, handleR, color)
 		drawCircleV(s.P2, handleR, color)
+	}
+}
+
+// drawTurnLinkMode visualises authored turn links as directional arrows
+// from the source spline's midpoint to the target spline's start, colour
+// coded by direction. Highlights the hovered spline and the first-selected
+// spline in the two-click workflow.
+func drawTurnLinkMode(splines []Spline, firstSelectedID int, hoveredSpline int, zoom float32) {
+	leftColor := NewColor(60, 150, 255, 210)  // blue — left turn
+	rightColor := NewColor(255, 170, 30, 210) // amber — right turn
+	selectedColor := NewColor(255, 200, 50, 255)
+	hoveredColor := NewColor(255, 140, 30, 200)
+	thickness := pixelsToWorld(zoom, 2)
+	dotR := pixelsToWorld(zoom, 4)
+
+	splineIndexByID := simpkg.BuildSplineIndexByID(splines)
+	drawArrow := func(from, to Vec2, color Color) {
+		drawLineEx(from, to, thickness, color)
+		drawCircleV(to, dotR*1.2, color)
+		// Small arrow head: back two short lines from the target.
+		dir := normalize(vecSub(to, from))
+		if dir.X == 0 && dir.Y == 0 {
+			return
+		}
+		headLen := pixelsToWorld(zoom, 10)
+		left := Vec2{X: -dir.Y, Y: dir.X}
+		tip := vecSub(to, vecScale(dir, dotR*1.2))
+		back := vecSub(tip, vecScale(dir, headLen))
+		leftBase := vecAdd(back, vecScale(left, headLen*0.55))
+		rightBase := vecSub(back, vecScale(left, headLen*0.55))
+		drawLineEx(tip, leftBase, thickness, color)
+		drawLineEx(tip, rightBase, thickness, color)
+	}
+
+	drawLinkSet := func(src Spline, ids []int, color Color) {
+		origin := src.Samples[simSamples*3/4]
+		for _, targetID := range ids {
+			idx, ok := splineIndexByID[targetID]
+			if !ok {
+				continue
+			}
+			dst := splines[idx].Samples[0]
+			drawArrow(origin, dst, color)
+		}
+	}
+
+	for _, spline := range splines {
+		drawLinkSet(spline, spline.LeftTurnLinkIDs, leftColor)
+		drawLinkSet(spline, spline.RightTurnLinkIDs, rightColor)
+	}
+
+	if hoveredSpline >= 0 {
+		mid := splines[hoveredSpline].Samples[simSamples/2]
+		drawCircleV(mid, pixelsToWorld(zoom, 8), hoveredColor)
+	}
+	if firstSelectedID >= 0 {
+		idx := findSplineIndexByID(splines, firstSelectedID)
+		if idx >= 0 {
+			mid := splines[idx].Samples[simSamples/2]
+			drawCircleV(mid, pixelsToWorld(zoom, 10), selectedColor)
+		}
 	}
 }
 
@@ -4201,6 +4357,62 @@ func drawCars(cars []Car, splines []Spline, splineIndexByID map[int]int, zoom fl
 		if bodyVisible && car.VehicleKind == VehicleBus && car.BusStopTimer > 0 {
 			drawCircleV(center, maxf(car.Width*0.24, pixelsToWorld(zoom, 2.5)), NewColor(255, 200, 40, 255))
 		}
+		if car.TurnSignal != simpkg.TurnSignalNone && turnSignalBlinkOnForCar(car.ID) {
+			drawTurnSignalDots(car, center, bodyHeading, trailerCenter, trailerHeading, bodyVisible, trailerVisible, zoom)
+		}
+	}
+}
+
+// Indicator blink cadence. Each car gets a slightly different half-period
+// and phase offset derived from its ID so the pack doesn't flash in sync.
+// Real 12 V flasher relays run ~1.3–1.8 Hz (half-period 0.28–0.39 s); we
+// spread cars across that band and add up to one half-period of phase
+// offset. Wall-clock based so indicators keep blinking while the sim is
+// paused.
+const (
+	turnSignalBlinkHalfPeriodMinS  = 0.32
+	turnSignalBlinkHalfPeriodSpanS = 0.12
+	turnSignalBlinkPhaseSpreadS    = 0.40
+)
+
+func turnSignalBlinkOnForCar(carID int) bool {
+	// Stable pseudo-random fractions in [0,1) without needing a PRNG per
+	// frame. Using two coprime-ish moduli keeps rate and phase
+	// uncorrelated for adjacent IDs.
+	id := uint32(carID)
+	rateFrac := float64(id%97) / 97.0
+	phaseFrac := float64((id*73+11)%113) / 113.0
+	half := turnSignalBlinkHalfPeriodMinS + rateFrac*turnSignalBlinkHalfPeriodSpanS
+	offset := phaseFrac * turnSignalBlinkPhaseSpreadS
+	return int((rl.GetTime()+offset)/half)%2 == 0
+}
+
+// drawTurnSignalDots paints one amber dot at the front and one at the rear on
+// the indicating side of the car body, plus a matching dot at the back of the
+// trailer for articulated rigs.
+func drawTurnSignalDots(car Car, center, bodyHeading, trailerCenter, trailerHeading Vec2, bodyVisible, trailerVisible bool, zoom float32) {
+	side := float32(1)
+	if car.TurnSignal == simpkg.TurnSignalLeft {
+		side = -1
+	}
+	amber := NewColor(255, 170, 30, 255)
+	if bodyVisible {
+		bodyRight := Vec2{X: bodyHeading.Y, Y: -bodyHeading.X}
+		inset := car.Length * 0.48
+		lateral := car.Width * 0.50
+		r := maxf(car.Width*0.12, pixelsToWorld(zoom, 2))
+		front := vecAdd(center, vecAdd(vecScale(bodyHeading, inset), vecScale(bodyRight, side*lateral)))
+		rear := vecAdd(center, vecAdd(vecScale(bodyHeading, -inset), vecScale(bodyRight, side*lateral)))
+		drawCircleV(front, r, amber)
+		drawCircleV(rear, r, amber)
+	}
+	if car.Trailer.HasTrailer && trailerVisible {
+		trailerRight := Vec2{X: trailerHeading.Y, Y: -trailerHeading.X}
+		tInset := car.Trailer.Length * 0.48
+		tLateral := car.Trailer.Width * 0.50
+		tr := maxf(car.Trailer.Width*0.12, pixelsToWorld(zoom, 2))
+		tRear := vecAdd(trailerCenter, vecAdd(vecScale(trailerHeading, -tInset), vecScale(trailerRight, side*tLateral)))
+		drawCircleV(tRear, tr, amber)
 	}
 }
 
@@ -4684,6 +4896,8 @@ func modeStatusText(mode EditorMode, tool EditorTool, stage Stage, draft Draft, 
 			return fmt.Sprintf("Click second spline to couple/decouple with #%d  (right-click cancels)", coupleModeFirstID)
 		}
 		return "Click a spline to select it"
+	case ToolTurnLink:
+		return "Click source spline, then left click target for right-turn link, right click for left-turn link  (Esc cancels)"
 	case ToolCut:
 		if stage == StageSetP1 {
 			return "Place tangent handle at cut point  (right-click cancels)"
@@ -4751,6 +4965,8 @@ func toolName(tool EditorTool) string {
 		return "Priority"
 	case ToolCouple:
 		return "Couple"
+	case ToolTurnLink:
+		return "Turn Link"
 	case ToolSpeedLimit:
 		return "Speed"
 	case ToolPreference:

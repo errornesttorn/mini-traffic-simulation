@@ -31,6 +31,19 @@ const (
 	CarControlExternal
 )
 
+// TurnSignalState is what the simulator decides about a car's indicator: off,
+// flashing left, or flashing right. The sim only records direction — the
+// blinking cadence is a display concern (the sim is time-step/pause aware and
+// the signal state would need to be de-ticked during pauses, whereas a pure
+// wall-clock blink in the renderer is simpler and stays lively during pauses).
+type TurnSignalState uint8
+
+const (
+	TurnSignalNone TurnSignalState = iota
+	TurnSignalLeft
+	TurnSignalRight
+)
+
 const (
 	simSamples = 96
 
@@ -153,10 +166,17 @@ type Spline struct {
 	SampleCurv     []float32
 	HardCoupledIDs []int
 	SoftCoupledIDs []int
-	SpeedLimitKmh  float32
-	LanePreference int
-	CurveSpeedMPS  []float32
-	TravelTimeS    float32
+	// LeftTurnLinkIDs and RightTurnLinkIDs are directional hints telling the
+	// sim that a car travelling onto a listed successor spline is making a
+	// left (or right) turn. Used by assignCarTurnSignals to activate the
+	// indicator when the car's routed next spline matches a link. Links are
+	// not implied bidirectional — only the source spline stores them.
+	LeftTurnLinkIDs  []int
+	RightTurnLinkIDs []int
+	SpeedLimitKmh    float32
+	LanePreference   int
+	CurveSpeedMPS    []float32
+	TravelTimeS      float32
 }
 
 type BusStop struct {
@@ -229,6 +249,12 @@ type Car struct {
 	NextBusStopIndex   int
 	BusStopTimer       float32
 	BusStopDuration    float32
+
+	// TurnSignal is refreshed each simulation step by assignCarTurnSignals
+	// based on the car's lane-change state (desired lane or active bridge).
+	// Display code reads this for the indicator direction; the on/off
+	// blinking phase is owned by the renderer.
+	TurnSignal TurnSignalState
 
 	Trailer Trailer
 }
@@ -796,6 +822,8 @@ func cloneSplines(src []Spline) []Spline {
 	for i := range dst {
 		dst[i].HardCoupledIDs = cloneIntSlice(src[i].HardCoupledIDs)
 		dst[i].SoftCoupledIDs = cloneIntSlice(src[i].SoftCoupledIDs)
+		dst[i].LeftTurnLinkIDs = cloneIntSlice(src[i].LeftTurnLinkIDs)
+		dst[i].RightTurnLinkIDs = cloneIntSlice(src[i].RightTurnLinkIDs)
 		dst[i].SampleTangents = cloneVec2Slice(src[i].SampleTangents)
 		dst[i].SampleCurv = cloneFloat32Slice(src[i].SampleCurv)
 		dst[i].CurveSpeedMPS = cloneFloat32Slice(src[i].CurveSpeedMPS)
@@ -1253,6 +1281,7 @@ func (w *World) Step(dt float32) {
 	pedestrianCars = append(pedestrianCars, simCars...)
 	pedestrianCars = append(pedestrianCars, externalCars...)
 	w.Pedestrians, w.PedestrianSpawnTimers = updatePedestrians(w.Pedestrians, w.PedestrianPaths, &w.NextPedestrianID, w.PedestrianSpawnTimers, dt, pedestrianCrossings, pedestrianCars, stoppingPedestrianLights)
+	assignCarTurnSignals(simCars, allGraph)
 	w.UpdateCarsMS = sinceMS(updateCarsStart)
 	w.Cars = append(simCars, externalCars...)
 
@@ -2200,17 +2229,19 @@ type SavedTrafficCycle struct {
 }
 
 type SavedSpline struct {
-	ID             int     `json:"id"`
-	Priority       bool    `json:"priority"`
-	BusOnly        bool    `json:"bus_only,omitempty"`
-	P0             Vec2    `json:"p0"`
-	P1             Vec2    `json:"p1"`
-	P2             Vec2    `json:"p2"`
-	P3             Vec2    `json:"p3"`
-	HardCoupledIDs []int   `json:"hard_coupled_ids,omitempty"`
-	SoftCoupledIDs []int   `json:"soft_coupled_ids,omitempty"`
-	SpeedLimitKmh  float32 `json:"speed_limit_kmh,omitempty"`
-	LanePreference int     `json:"lane_preference,omitempty"`
+	ID               int     `json:"id"`
+	Priority         bool    `json:"priority"`
+	BusOnly          bool    `json:"bus_only,omitempty"`
+	P0               Vec2    `json:"p0"`
+	P1               Vec2    `json:"p1"`
+	P2               Vec2    `json:"p2"`
+	P3               Vec2    `json:"p3"`
+	HardCoupledIDs   []int   `json:"hard_coupled_ids,omitempty"`
+	SoftCoupledIDs   []int   `json:"soft_coupled_ids,omitempty"`
+	LeftTurnLinkIDs  []int   `json:"left_turn_link_ids,omitempty"`
+	RightTurnLinkIDs []int   `json:"right_turn_link_ids,omitempty"`
+	SpeedLimitKmh    float32 `json:"speed_limit_kmh,omitempty"`
+	LanePreference   int     `json:"lane_preference,omitempty"`
 }
 
 type SavedBusStop struct {
@@ -2260,17 +2291,19 @@ func (w *World) Save(path string) error {
 	}
 	for _, spline := range w.Splines {
 		saved.Splines = append(saved.Splines, SavedSpline{
-			ID:             spline.ID,
-			Priority:       spline.Priority,
-			BusOnly:        spline.BusOnly,
-			P0:             spline.P0,
-			P1:             spline.P1,
-			P2:             spline.P2,
-			P3:             spline.P3,
-			HardCoupledIDs: append([]int(nil), spline.HardCoupledIDs...),
-			SoftCoupledIDs: append([]int(nil), spline.SoftCoupledIDs...),
-			SpeedLimitKmh:  spline.SpeedLimitKmh,
-			LanePreference: spline.LanePreference,
+			ID:               spline.ID,
+			Priority:         spline.Priority,
+			BusOnly:          spline.BusOnly,
+			P0:               spline.P0,
+			P1:               spline.P1,
+			P2:               spline.P2,
+			P3:               spline.P3,
+			HardCoupledIDs:   append([]int(nil), spline.HardCoupledIDs...),
+			SoftCoupledIDs:   append([]int(nil), spline.SoftCoupledIDs...),
+			LeftTurnLinkIDs:  append([]int(nil), spline.LeftTurnLinkIDs...),
+			RightTurnLinkIDs: append([]int(nil), spline.RightTurnLinkIDs...),
+			SpeedLimitKmh:    spline.SpeedLimitKmh,
+			LanePreference:   spline.LanePreference,
 		})
 	}
 	for _, route := range w.Routes {
@@ -2378,6 +2411,8 @@ func LoadWorld(path string) (*World, error) {
 		spline.BusOnly = entry.BusOnly
 		spline.HardCoupledIDs = append([]int(nil), entry.HardCoupledIDs...)
 		spline.SoftCoupledIDs = append([]int(nil), entry.SoftCoupledIDs...)
+		spline.LeftTurnLinkIDs = append([]int(nil), entry.LeftTurnLinkIDs...)
+		spline.RightTurnLinkIDs = append([]int(nil), entry.RightTurnLinkIDs...)
 		spline.SpeedLimitKmh = entry.SpeedLimitKmh
 		spline.LanePreference = entry.LanePreference
 		spline.CurveSpeedMPS = buildCurveSpeedProfile(&spline)
@@ -4537,6 +4572,103 @@ func updateCars(cars []Car, routes []Route, graph *RoadGraph, brakingDecisions [
 	profile.TransitionMS = sinceMS(transitionStart)
 
 	return alive, indexRemap, profile
+}
+
+// turnSignalDeadbandM is the minimum lateral offset (meters) between current
+// and target lane at the sample point before we consider the lane change
+// directional. Keeps straight-following sibling splines from flickering.
+const turnSignalDeadbandM float32 = 0.15
+
+// computeCarTurnSignal decides whether a car should indicate left, right, or
+// neither this step. Trigger order:
+//  1. LaneChanging: project the bridge's start→end vector onto the source
+//     heading's right normal.
+//  2. DesiredLaneSplineID set: project (target lane projected point − current
+//     pose) onto the current heading's right normal.
+//  3. Map-authored turn links: if the car's routed next spline matches a
+//     Left/RightTurnLinkIDs entry on its current spline, indicate that way.
+func computeCarTurnSignal(car Car, graph *RoadGraph) TurnSignalState {
+	if car.LaneChanging {
+		bridge, ok := graph.splinePtrByID(car.CurrentSplineID)
+		if !ok || bridge.Length <= 0 {
+			return TurnSignalNone
+		}
+		_, startHeading := sampleSplineAtDistance(bridge, 0)
+		offset := vecSub(bridge.P3, bridge.P0)
+		rightNormal := Vec2{X: startHeading.Y, Y: -startHeading.X}
+		lateral := dot(offset, rightNormal)
+		if lateral > turnSignalDeadbandM {
+			return TurnSignalRight
+		}
+		if lateral < -turnSignalDeadbandM {
+			return TurnSignalLeft
+		}
+		return TurnSignalNone
+	}
+	if car.DesiredLaneSplineID >= 0 {
+		current, okCur := graph.splinePtrByID(car.CurrentSplineID)
+		desired, okDst := graph.splinePtrByID(car.DesiredLaneSplineID)
+		if okCur && okDst {
+			carPos, carHeading := sampleSplineAtDistance(current, car.DistanceOnSpline)
+			_, projDist := nearestSampleWithDist(desired, carPos)
+			targetPos, _ := sampleSplineAtDistance(desired, projDist)
+			offset := vecSub(targetPos, carPos)
+			rightNormal := Vec2{X: carHeading.Y, Y: -carHeading.X}
+			lateral := dot(offset, rightNormal)
+			if lateral > turnSignalDeadbandM {
+				return TurnSignalRight
+			}
+			if lateral < -turnSignalDeadbandM {
+				return TurnSignalLeft
+			}
+		}
+	}
+	return turnSignalFromMapLinks(car, graph)
+}
+
+// turnSignalFromMapLinks returns the indicator direction implied by the
+// author-placed turn-link arrows on the car's current spline, if the car's
+// routed next spline matches one. Returns TurnSignalNone if the car has no
+// known destination, the next spline can't be resolved, or neither list
+// contains it.
+func turnSignalFromMapLinks(car Car, graph *RoadGraph) TurnSignalState {
+	current, ok := graph.splinePtrByID(car.CurrentSplineID)
+	if !ok {
+		return TurnSignalNone
+	}
+	if len(current.LeftTurnLinkIDs) == 0 && len(current.RightTurnLinkIDs) == 0 {
+		return TurnSignalNone
+	}
+	if car.DestinationSplineID <= 0 || car.CurrentSplineID == car.DestinationSplineID {
+		return TurnSignalNone
+	}
+	nextID, ok := ChooseNextSplineOnBestPathWithGraph(graph, car.CurrentSplineID, car.DestinationSplineID, car.VehicleKind)
+	if !ok {
+		return TurnSignalNone
+	}
+	for _, id := range current.LeftTurnLinkIDs {
+		if id == nextID {
+			return TurnSignalLeft
+		}
+	}
+	for _, id := range current.RightTurnLinkIDs {
+		if id == nextID {
+			return TurnSignalRight
+		}
+	}
+	return TurnSignalNone
+}
+
+// assignCarTurnSignals refreshes each car's TurnSignal field in place based
+// on the current lane-change state. External-controlled cars are left alone
+// so the player/controller can drive their indicators directly.
+func assignCarTurnSignals(cars []Car, graph *RoadGraph) {
+	for i := range cars {
+		if cars[i].ControlMode == CarControlExternal {
+			continue
+		}
+		cars[i].TurnSignal = computeCarTurnSignal(cars[i], graph)
+	}
 }
 
 func laneChangeFeasibleAt(src, dst Spline, distance, speed float32) bool {
