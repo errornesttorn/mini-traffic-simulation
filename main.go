@@ -1260,7 +1260,7 @@ func main() {
 				}
 			case ToolPedestrianPath:
 				var changed bool
-				pedestrianDraft, pedestrianPaths, changed = handlePedestrianPathMode(pedestrianDraft, pedestrianPaths, mouseWorld, camera.Zoom)
+				pedestrianDraft, pedestrianPaths, trafficLights, trafficCycles, changed = handlePedestrianPathMode(pedestrianDraft, pedestrianPaths, trafficLights, trafficCycles, mouseWorld, camera.Zoom)
 				if changed {
 					editorMutatedWorld = true
 					pedestrianTopologyChanged = true
@@ -1490,7 +1490,7 @@ func main() {
 							}
 						}
 					} else if editingCycleID >= 0 && editingLights {
-						trafficLights, trafficCycles = handleTrafficLightEdit(splines, trafficLights, trafficCycles, editingCycleID, mouseWorld, camera.Zoom, &nextLightID)
+						trafficLights, trafficCycles = handleTrafficLightEdit(splines, pedestrianPaths, trafficLights, trafficCycles, editingCycleID, mouseWorld, camera.Zoom, &nextLightID)
 						if rl.IsMouseButtonPressed(rl.MouseButtonLeft) || rl.IsMouseButtonPressed(rl.MouseButtonRight) {
 							editorMutatedWorld = true
 						}
@@ -1504,10 +1504,10 @@ func main() {
 									}
 								}
 							} else {
-								pendingLights = handleTrafficLightMode(splines, pendingLights, mouseWorld, camera.Zoom, &nextLightID)
+								pendingLights = handleTrafficLightMode(splines, pedestrianPaths, pendingLights, mouseWorld, camera.Zoom, &nextLightID)
 							}
 						} else {
-							pendingLights = handleTrafficLightMode(splines, pendingLights, mouseWorld, camera.Zoom, &nextLightID)
+							pendingLights = handleTrafficLightMode(splines, pedestrianPaths, pendingLights, mouseWorld, camera.Zoom, &nextLightID)
 						}
 					}
 				}
@@ -1727,7 +1727,12 @@ func main() {
 		}
 		drawTrafficLights(trafficLights, pendingLights, trafficCycles, editingCycleID, editingPhaseIdx, showPhaseIdx, camera.Zoom, viewRect)
 		if tool == ToolTrafficLight && (editingCycleID < 0 || editingLights) && editingPhaseIdx < 0 {
-			if _, _, snap, found := findNearestSplinePoint(splines, mouseWorld); found {
+			pathTol := simpkg.PedestrianPathWidthM*0.5 + pixelsToWorld(camera.Zoom, 12)
+			if pick := findNearestPedestrianPathPoint(pedestrianPaths, mouseWorld, pathTol); pick.Found {
+				r := pixelsToWorld(camera.Zoom, 8)
+				drawCircleV(pick.WorldPos, r, NewColor(255, 200, 0, 180))
+				drawRing(pick.WorldPos, r*0.6, r, 0, 360, 16, NewColor(220, 160, 0, 220))
+			} else if _, _, snap, found := findNearestSplinePoint(splines, mouseWorld); found {
 				r := pixelsToWorld(camera.Zoom, 8)
 				drawCircleV(snap, r, NewColor(255, 200, 0, 180))
 				drawRing(snap, r*0.6, r, 0, 360, 16, NewColor(220, 160, 0, 220))
@@ -2577,10 +2582,91 @@ func handlePreferenceMode(splines []Spline, hoveredSpline, lastPref int) ([]Spli
 
 // ---------- traffic light mode handlers ----------
 
-func handleTrafficLightMode(splines []Spline, pending []TrafficLight, mouseWorld Vec2, zoom float32, nextLightID *int) []TrafficLight {
+// pedestrianPathLightPick describes where a candidate pedestrian-path traffic
+// light would land if placed at the cursor. DistOnPath is arc length from P0.
+// Forward indicates which direction the light faces: true means the light
+// stops pedestrians walking from P0 toward P1 (placed on the right side of
+// the path in Y-down screen coords), false means the P1→P0 direction.
+type pedestrianPathLightPick struct {
+	PathIndex  int
+	DistOnPath float32
+	Forward    bool
+	WorldPos   Vec2
+	Found      bool
+}
+
+// pedestrianPathLightSideOffsetM positions the placed light well outside the
+// path so its colour is visible and its direction is obvious. A little wider
+// than the half-width keeps it clear of walking pedestrians.
+const pedestrianPathLightSideOffsetM float32 = simpkg.PedestrianPathWidthM*0.5 + 0.6
+
+// findNearestPedestrianPathPoint returns a pick for the pedestrian path whose
+// segment is closest to pos and which lies within pickTolerance of it. The
+// side of the path (right → Forward=true, left → Forward=false) is taken from
+// where pos sits relative to the path's right normal in Y-down screen coords.
+func findNearestPedestrianPathPoint(paths []simpkg.PedestrianPath, pos Vec2, pickTolerance float32) pedestrianPathLightPick {
+	pick := pedestrianPathLightPick{Found: false}
+	bestSq := pickTolerance * pickTolerance
+	for i, p := range paths {
+		ab := vecSub(p.P1, p.P0)
+		lenSq := dot(ab, ab)
+		if lenSq <= 1e-6 {
+			continue
+		}
+		t := dot(vecSub(pos, p.P0), ab) / lenSq
+		if t < 0 {
+			t = 0
+		} else if t > 1 {
+			t = 1
+		}
+		proj := vecAdd(p.P0, vecScale(ab, t))
+		if d := distSq(pos, proj); d < bestSq {
+			bestSq = d
+			length := sqrtfLocal(lenSq)
+			dir := vecScale(ab, 1/length)
+			// Y-down screen right-normal (matches pedestrianRuntimePath.Normal).
+			rightNormal := Vec2{X: -dir.Y, Y: dir.X}
+			side := dot(vecSub(pos, proj), rightNormal)
+			forward := side >= 0
+			placement := proj
+			if forward {
+				placement = vecAdd(proj, vecScale(rightNormal, pedestrianPathLightSideOffsetM))
+			} else {
+				placement = vecAdd(proj, vecScale(rightNormal, -pedestrianPathLightSideOffsetM))
+			}
+			pick = pedestrianPathLightPick{
+				PathIndex:  i,
+				DistOnPath: t * length,
+				Forward:    forward,
+				WorldPos:   placement,
+				Found:      true,
+			}
+		}
+	}
+	return pick
+}
+
+// sqrtfLocal is a tiny helper — main.go doesn't otherwise import math/sqrtf,
+// but we need a float32 sqrt for path length computation at pick time.
+func sqrtfLocal(v float32) float32 {
+	return float32(math.Sqrt(float64(v)))
+}
+
+func handleTrafficLightMode(splines []Spline, paths []simpkg.PedestrianPath, pending []TrafficLight, mouseWorld Vec2, zoom float32, nextLightID *int) []TrafficLight {
 	if rl.IsMouseButtonPressed(rl.MouseButtonLeft) {
-		si, t, point, found := findNearestSplinePoint(splines, mouseWorld)
-		if found {
+		pathTol := simpkg.PedestrianPathWidthM*0.5 + pixelsToWorld(zoom, 12)
+		if pick := findNearestPedestrianPathPoint(paths, mouseWorld, pathTol); pick.Found {
+			pending = append(pending, TrafficLight{
+				ID:                  *nextLightID,
+				SplineID:            0,
+				CycleID:             -1,
+				WorldPos:            pick.WorldPos,
+				PedestrianPathIndex: pick.PathIndex,
+				DistOnPath:          pick.DistOnPath,
+				PedestrianForward:   pick.Forward,
+			})
+			*nextLightID++
+		} else if si, t, point, found := findNearestSplinePoint(splines, mouseWorld); found {
 			idx := int(t * float32(simSamples))
 			if idx > simSamples {
 				idx = simSamples
@@ -3183,10 +3269,28 @@ func trafficCycleLightCount(cycleID int, lights []TrafficLight) int {
 }
 
 // handleTrafficLightEdit adds or removes placed lights from an existing cycle.
-func handleTrafficLightEdit(splines []Spline, lights []TrafficLight, cycles []TrafficCycle, cycleID int, mouseWorld Vec2, zoom float32, nextLightID *int) ([]TrafficLight, []TrafficCycle) {
+func handleTrafficLightEdit(splines []Spline, paths []simpkg.PedestrianPath, lights []TrafficLight, cycles []TrafficCycle, cycleID int, mouseWorld Vec2, zoom float32, nextLightID *int) ([]TrafficLight, []TrafficCycle) {
 	if rl.IsMouseButtonPressed(rl.MouseButtonLeft) {
-		si, t, point, found := findNearestSplinePoint(splines, mouseWorld)
-		if found {
+		pathTol := simpkg.PedestrianPathWidthM*0.5 + pixelsToWorld(zoom, 12)
+		if pick := findNearestPedestrianPathPoint(paths, mouseWorld, pathTol); pick.Found {
+			newLight := TrafficLight{
+				ID:                  *nextLightID,
+				SplineID:            0,
+				CycleID:             cycleID,
+				WorldPos:            pick.WorldPos,
+				PedestrianPathIndex: pick.PathIndex,
+				DistOnPath:          pick.DistOnPath,
+				PedestrianForward:   pick.Forward,
+			}
+			*nextLightID++
+			lights = append(lights, newLight)
+			for ci := range cycles {
+				if cycles[ci].ID == cycleID {
+					cycles[ci].LightIDs = append(cycles[ci].LightIDs, newLight.ID)
+					break
+				}
+			}
+		} else if si, t, point, found := findNearestSplinePoint(splines, mouseWorld); found {
 			idx := int(t * float32(simSamples))
 			if idx > simSamples {
 				idx = simSamples
@@ -6001,7 +6105,7 @@ func findPedestrianPathAt(paths []simpkg.PedestrianPath, point Vec2, radius floa
 	return idx
 }
 
-func handlePedestrianPathMode(draft pedestrianPathDraft, paths []simpkg.PedestrianPath, mouseWorld Vec2, zoom float32) (pedestrianPathDraft, []simpkg.PedestrianPath, bool) {
+func handlePedestrianPathMode(draft pedestrianPathDraft, paths []simpkg.PedestrianPath, lights []TrafficLight, cycles []TrafficCycle, mouseWorld Vec2, zoom float32) (pedestrianPathDraft, []simpkg.PedestrianPath, []TrafficLight, []TrafficCycle, bool) {
 	changed := false
 	if rl.IsKeyPressed(rl.KeyEscape) && draft.HasP0 {
 		draft = pedestrianPathDraft{}
@@ -6013,6 +6117,7 @@ func handlePedestrianPathMode(draft pedestrianPathDraft, paths []simpkg.Pedestri
 			radius := pixelsToWorld(zoom, hoverPixels)
 			if idx := findPedestrianPathAt(paths, mouseWorld, radius); idx >= 0 {
 				paths = append(paths[:idx], paths[idx+1:]...)
+				lights, cycles = removePedestrianLightsForPath(lights, cycles, idx)
 				changed = true
 			}
 		}
@@ -6030,7 +6135,53 @@ func handlePedestrianPathMode(draft pedestrianPathDraft, paths []simpkg.Pedestri
 			draft = pedestrianPathDraft{}
 		}
 	}
-	return draft, paths, changed
+	return draft, paths, lights, cycles, changed
+}
+
+// removePedestrianLightsForPath drops lights that reference the deleted path
+// and shifts higher indices down so surviving pedestrian lights still point
+// at the right PedestrianPath after a deletion. Cycle light lists are fixed
+// up too so they don't dangle.
+func removePedestrianLightsForPath(lights []TrafficLight, cycles []TrafficCycle, deletedIdx int) ([]TrafficLight, []TrafficCycle) {
+	removedIDs := map[int]bool{}
+	kept := lights[:0]
+	for _, l := range lights {
+		if l.IsPedestrianLight() {
+			if l.PedestrianPathIndex == deletedIdx {
+				removedIDs[l.ID] = true
+				continue
+			}
+			if l.PedestrianPathIndex > deletedIdx {
+				l.PedestrianPathIndex--
+			}
+		}
+		kept = append(kept, l)
+	}
+	if len(removedIDs) > 0 {
+		for ci := range cycles {
+			ids := cycles[ci].LightIDs
+			pruned := ids[:0]
+			for _, id := range ids {
+				if removedIDs[id] {
+					continue
+				}
+				pruned = append(pruned, id)
+			}
+			cycles[ci].LightIDs = pruned
+			for pi := range cycles[ci].Phases {
+				gids := cycles[ci].Phases[pi].GreenLightIDs
+				pg := gids[:0]
+				for _, id := range gids {
+					if removedIDs[id] {
+						continue
+					}
+					pg = append(pg, id)
+				}
+				cycles[ci].Phases[pi].GreenLightIDs = pg
+			}
+		}
+	}
+	return kept, cycles
 }
 
 // ---------- pedestrian path rendering ----------

@@ -91,8 +91,8 @@ const (
 	pedestrianSpawnJitterFrac         float32 = 0.25
 	pedestrianSpawnRetryDelayS        float32 = 0.75
 	pedestrianSpawnInsetM             float32 = 0.35
-	pedestrianSpeedMinMPS             float32 = 1.1
-	pedestrianSpeedMaxMPS             float32 = 1.7
+	pedestrianSpeedMinMPS             float32 = 1.65
+	pedestrianSpeedMaxMPS             float32 = 2.55
 	pedestrianMinSpeedFactor          float32 = 0.35
 	pedestrianRadiusM                 float32 = 0.28
 	pedestrianPreferredOffsetM        float32 = 0.75
@@ -598,6 +598,23 @@ type TrafficLight struct {
 	DistOnSpline float32
 	WorldPos     Vec2
 	CycleID      int
+
+	// Pedestrian-path lights leave SplineID at 0 (spline IDs always start at
+	// 1) and set PedestrianPathIndex to an index into the world's
+	// PedestrianPaths. DistOnPath is measured along the path from P0;
+	// PedestrianForward=true means the light affects pedestrians walking from
+	// P0 toward P1 (placed on the right side of the path, in Y-down screen
+	// coords), false means the P1→P0 direction.
+	PedestrianPathIndex int
+	DistOnPath          float32
+	PedestrianForward   bool
+}
+
+// IsPedestrianLight reports whether this light controls pedestrians on a path
+// rather than cars on a spline. Spline IDs start at 1, so SplineID <= 0 is a
+// reliable sentinel.
+func (l TrafficLight) IsPedestrianLight() bool {
+	return l.SplineID <= 0
 }
 
 type TrafficPhase struct {
@@ -1211,7 +1228,8 @@ func (w *World) Step(dt float32) {
 	simFollowCaps := projectFloat32Slice(followCaps, split.simSourceIndices)
 
 	pedestrianCrossings := computePedestrianCrossings(w.PedestrianPaths, w.Splines)
-	pedestrianBlockedBySpline := buildPedestrianBlockedSplineDists(pedestrianCrossings, w.Pedestrians)
+	stoppingPedestrianLights := buildStoppingPedestrianLightsByPath(w.TrafficLights, w.TrafficCycles)
+	pedestrianBlockedBySpline := buildPedestrianBlockedSplineDists(pedestrianCrossings, w.PedestrianPaths, w.Pedestrians, stoppingPedestrianLights)
 
 	updateCarsStart := time.Now()
 	simCars := split.simCars
@@ -1229,7 +1247,7 @@ func (w *World) Step(dt float32) {
 	pedestrianCars := make([]Car, 0, len(simCars)+len(externalCars))
 	pedestrianCars = append(pedestrianCars, simCars...)
 	pedestrianCars = append(pedestrianCars, externalCars...)
-	w.Pedestrians, w.PedestrianSpawnTimers = updatePedestrians(w.Pedestrians, w.PedestrianPaths, &w.NextPedestrianID, w.PedestrianSpawnTimers, dt, pedestrianCrossings, pedestrianCars)
+	w.Pedestrians, w.PedestrianSpawnTimers = updatePedestrians(w.Pedestrians, w.PedestrianPaths, &w.NextPedestrianID, w.PedestrianSpawnTimers, dt, pedestrianCrossings, pedestrianCars, stoppingPedestrianLights)
 	w.UpdateCarsMS = sinceMS(updateCarsStart)
 	w.Cars = append(simCars, externalCars...)
 
@@ -1606,9 +1624,12 @@ func computePedestrianCrossings(paths []PedestrianPath, splines []Spline) []pede
 
 // buildPedestrianBlockedSplineDists returns, per spline ID, the distances at
 // which a pedestrian is near enough to a crossing to block cars as if it were
-// a red light. Duplicates may appear and are fine: the speed-cap function just
+// a red light. A pedestrian stopped at a red pedestrian light that sits
+// between them and the crossing won't actually reach the crossing, so we skip
+// those: cars shouldn't yield to a pedestrian waiting at their own red.
+// Duplicates may appear in the output and are fine — the speed-cap function
 // picks the most restrictive one.
-func buildPedestrianBlockedSplineDists(crossings []pedestrianCrossing, pedestrians []Pedestrian) map[int][]float32 {
+func buildPedestrianBlockedSplineDists(crossings []pedestrianCrossing, paths []PedestrianPath, pedestrians []Pedestrian, stoppingPedestrianLights map[int][]TrafficLight) map[int][]float32 {
 	if len(crossings) == 0 || len(pedestrians) == 0 {
 		return nil
 	}
@@ -1616,15 +1637,55 @@ func buildPedestrianBlockedSplineDists(crossings []pedestrianCrossing, pedestria
 	for _, c := range crossings {
 		byPath[c.PathIndex] = append(byPath[c.PathIndex], c)
 	}
+	pathLengths := make([]float32, len(paths))
+	for i, p := range paths {
+		diff := vecSub(p.P1, p.P0)
+		pathLengths[i] = sqrtf(vectorLengthSq(diff))
+	}
 	result := make(map[int][]float32)
 	for _, ped := range pedestrians {
 		pathCrossings := byPath[ped.PathIndex]
 		if len(pathCrossings) == 0 {
 			continue
 		}
-		for _, c := range pathCrossings {
-			if absf(ped.Distance-c.DistOnPath) > pedestrianCrossingBlockRadiusM {
+		if ped.PathIndex < 0 || ped.PathIndex >= len(pathLengths) {
+			continue
+		}
+		length := pathLengths[ped.PathIndex]
+		var pedX float32
+		if ped.Forward {
+			pedX = ped.Distance
+		} else {
+			pedX = length - ped.Distance
+		}
+		// Nearest red pedestrian light ahead of this ped in their direction.
+		// -1 means no barrier; otherwise path-x of the first matching light.
+		nextRedX := float32(-1)
+		for _, light := range stoppingPedestrianLights[ped.PathIndex] {
+			if light.PedestrianForward != ped.Forward {
 				continue
+			}
+			if ped.Forward {
+				if light.DistOnPath > pedX && (nextRedX < 0 || light.DistOnPath < nextRedX) {
+					nextRedX = light.DistOnPath
+				}
+			} else {
+				if light.DistOnPath < pedX && (nextRedX < 0 || light.DistOnPath > nextRedX) {
+					nextRedX = light.DistOnPath
+				}
+			}
+		}
+		for _, c := range pathCrossings {
+			if absf(pedX-c.DistOnPath) > pedestrianCrossingBlockRadiusM {
+				continue
+			}
+			if nextRedX >= 0 {
+				if ped.Forward && c.DistOnPath > nextRedX {
+					continue
+				}
+				if !ped.Forward && c.DistOnPath < nextRedX {
+					continue
+				}
 			}
 			result[c.SplineID] = append(result[c.SplineID], c.DistOnSpline)
 		}
@@ -1707,23 +1768,60 @@ func anyCarOccupiesCrossing(cars []Car, splineID int, distOnSpline float32) bool
 	return false
 }
 
+// pedestrianStopDistanceForObstacle converts a path-x obstacle position into
+// a maximum ped.Distance the pedestrian may advance to this step, leaving the
+// given buffer. Returns (maxPedDistance, ok). ok=false means the obstacle is
+// already behind the pedestrian and should be ignored.
+func pedestrianStopDistanceForObstacle(path pedestrianRuntimePath, ped Pedestrian, obstacleX, buffer float32) (float32, bool) {
+	if ped.Forward {
+		// Forward ped progresses with ped.Distance increasing from 0 at P0 to
+		// path.Length at P1; path-x = ped.Distance. Obstacle is ahead only if
+		// its path-x is greater than where the ped is.
+		if obstacleX <= ped.Distance {
+			return 0, false
+		}
+		stop := obstacleX - buffer
+		if stop < 0 {
+			stop = 0
+		}
+		return stop, true
+	}
+	// Backward ped progresses with ped.Distance increasing from 0 at P1 to
+	// path.Length at P0; path-x = path.Length - ped.Distance. Obstacle is
+	// ahead (lower path-x) only if its path-x is below where the ped is.
+	if obstacleX >= path.Length-ped.Distance {
+		return 0, false
+	}
+	// Stop at path-x = obstacleX + buffer ⇒ ped.Distance = Length - (obstacleX + buffer).
+	stop := path.Length - (obstacleX + buffer)
+	if stop < 0 {
+		stop = 0
+	}
+	return stop, true
+}
+
 // computePedestrianMovementCaps returns, for each pedestrian, the maximum
-// canonical distance they are allowed to advance along their current path this
-// step. MaxFloat32 means no cap. The cap is placed pedestrianCrossingStopBufferM
-// before any crossing whose spline currently has a car in it. Pedestrians on a
-// junction transition are skipped; they'll pick up a cap once they settle on
-// the next path.
-func computePedestrianMovementCaps(pedestrians []Pedestrian, topology pedestrianTopology, crossings []pedestrianCrossing, cars []Car) []float32 {
+// ped.Distance (always non-decreasing as the pedestrian progresses, regardless
+// of walking direction) they are allowed to advance to this step. MaxFloat32
+// means no cap. Caps come from two sources: crossings whose spline currently
+// has a car in them, and red pedestrian-path traffic lights that match the
+// pedestrian's direction. Pedestrians in a junction transition are skipped.
+func computePedestrianMovementCaps(pedestrians []Pedestrian, topology pedestrianTopology, crossings []pedestrianCrossing, cars []Car, stoppingPedestrianLights map[int][]TrafficLight) []float32 {
 	caps := make([]float32, len(pedestrians))
 	for i := range caps {
 		caps[i] = float32(math.MaxFloat32)
 	}
-	if len(crossings) == 0 || len(cars) == 0 {
+	hasCrossings := len(crossings) > 0 && len(cars) > 0
+	hasLights := len(stoppingPedestrianLights) > 0
+	if !hasCrossings && !hasLights {
 		return caps
 	}
-	byPath := make(map[int][]pedestrianCrossing, len(crossings))
-	for _, c := range crossings {
-		byPath[c.PathIndex] = append(byPath[c.PathIndex], c)
+	var byPath map[int][]pedestrianCrossing
+	if hasCrossings {
+		byPath = make(map[int][]pedestrianCrossing, len(crossings))
+		for _, c := range crossings {
+			byPath[c.PathIndex] = append(byPath[c.PathIndex], c)
+		}
 	}
 	for i, ped := range pedestrians {
 		if ped.TransitionActive {
@@ -1736,40 +1834,162 @@ func computePedestrianMovementCaps(pedestrians []Pedestrian, topology pedestrian
 		if !path.Valid {
 			continue
 		}
-		pathCrossings := byPath[ped.PathIndex]
-		if len(pathCrossings) == 0 {
-			continue
-		}
-		pedCanonical := pedestrianCanonicalDistance(path, ped)
-		for _, c := range pathCrossings {
-			var canonicalStop float32
-			if ped.Forward {
-				if c.DistOnPath <= ped.Distance {
+		if hasCrossings {
+			for _, c := range byPath[ped.PathIndex] {
+				stop, ok := pedestrianStopDistanceForObstacle(path, ped, c.DistOnPath, pedestrianCrossingStopBufferM)
+				if !ok {
 					continue
 				}
-				canonicalStop = c.DistOnPath - pedestrianCrossingStopBufferM
-			} else {
-				if c.DistOnPath >= ped.Distance {
+				if !anyCarOccupiesCrossing(cars, c.SplineID, c.DistOnSpline) {
 					continue
 				}
-				canonicalStop = path.Length - (c.DistOnPath + pedestrianCrossingStopBufferM)
-			}
-			if canonicalStop < 0 {
-				canonicalStop = 0
-			}
-			if !anyCarOccupiesCrossing(cars, c.SplineID, c.DistOnSpline) {
-				continue
-			}
-			if canonicalStop < caps[i] {
-				caps[i] = canonicalStop
+				if stop < caps[i] {
+					caps[i] = stop
+				}
 			}
 		}
-		// Pedestrian already at/past the cap: keep them from sliding forward.
-		if caps[i] < pedCanonical {
-			caps[i] = pedCanonical
+		if hasLights {
+			for _, light := range stoppingPedestrianLights[ped.PathIndex] {
+				if light.PedestrianForward != ped.Forward {
+					continue
+				}
+				stop, ok := pedestrianStopDistanceForObstacle(path, ped, light.DistOnPath, pedestrianCrossingStopBufferM)
+				if !ok {
+					continue
+				}
+				if stop < caps[i] {
+					caps[i] = stop
+				}
+			}
+		}
+		// If the pedestrian is already at/past the cap, lock them in place
+		// rather than reeling them backwards.
+		if caps[i] < ped.Distance {
+			caps[i] = ped.Distance
 		}
 	}
+	// Queue pass: when multiple pedestrians walk the same direction on the
+	// same path, propagate caps so followers stop behind leaders with a small
+	// gap, instead of all piling onto the same stop line. The leader of a
+	// group is whoever is furthest along (highest ped.Distance, which grows
+	// monotonically regardless of direction).
+	propagatePedestrianQueueSpacing(pedestrians, topology, caps)
 	return caps
+}
+
+// pedestrianQueueSpacingM is one pedestrian-body diameter plus a small gap so
+// stopped pedestrians visibly queue without overlapping.
+const pedestrianQueueSpacingM = 2*pedestrianRadiusM + 0.25
+
+func propagatePedestrianQueueSpacing(pedestrians []Pedestrian, topology pedestrianTopology, caps []float32) {
+	if len(pedestrians) < 2 {
+		return
+	}
+	type queueEntry struct {
+		idx  int
+		dist float32
+	}
+	groups := make(map[[2]int][]queueEntry)
+	for i, ped := range pedestrians {
+		if ped.TransitionActive {
+			continue
+		}
+		if ped.PathIndex < 0 || ped.PathIndex >= len(topology.paths) {
+			continue
+		}
+		if !topology.paths[ped.PathIndex].Valid {
+			continue
+		}
+		dirKey := 0
+		if ped.Forward {
+			dirKey = 1
+		}
+		key := [2]int{ped.PathIndex, dirKey}
+		groups[key] = append(groups[key], queueEntry{i, ped.Distance})
+	}
+	for _, group := range groups {
+		if len(group) < 2 {
+			continue
+		}
+		sort.Slice(group, func(a, b int) bool {
+			return group[a].dist > group[b].dist
+		})
+		for k := 1; k < len(group); k++ {
+			leaderCap := caps[group[k-1].idx]
+			if leaderCap >= float32(math.MaxFloat32) {
+				continue
+			}
+			followerIdx := group[k].idx
+			maxFollowerCap := leaderCap - pedestrianQueueSpacingM
+			if maxFollowerCap < caps[followerIdx] {
+				caps[followerIdx] = maxFollowerCap
+			}
+			if caps[followerIdx] < pedestrians[followerIdx].Distance {
+				caps[followerIdx] = pedestrians[followerIdx].Distance
+			}
+		}
+	}
+}
+
+// buildStoppingPedestrianLightsByPath groups currently-red pedestrian-path
+// lights by their pedestrian path index. Mirrors buildStoppingTrafficLightsBySpline.
+func buildStoppingPedestrianLightsByPath(lights []TrafficLight, cycles []TrafficCycle) map[int][]TrafficLight {
+	if len(lights) == 0 || len(cycles) == 0 {
+		return nil
+	}
+	lightsByCycle := make(map[int][]TrafficLight, len(cycles))
+	for _, l := range lights {
+		if !l.IsPedestrianLight() {
+			continue
+		}
+		if l.CycleID >= 0 {
+			lightsByCycle[l.CycleID] = append(lightsByCycle[l.CycleID], l)
+		}
+	}
+	if len(lightsByCycle) == 0 {
+		return nil
+	}
+	stoppingByPath := make(map[int][]TrafficLight)
+	for _, c := range cycles {
+		cycleLights := lightsByCycle[c.ID]
+		if len(cycleLights) == 0 || !c.Enabled || len(c.Phases) == 0 {
+			continue
+		}
+		n := len(c.Phases)
+		ei := c.PhaseIndex
+		if n <= 1 || ei%2 == 0 {
+			userIdx := ei / 2
+			if userIdx >= n {
+				userIdx = n - 1
+			}
+			green := make(map[int]bool, len(c.Phases[userIdx].GreenLightIDs))
+			for _, lightID := range c.Phases[userIdx].GreenLightIDs {
+				green[lightID] = true
+			}
+			for _, l := range cycleLights {
+				if !green[l.ID] {
+					stoppingByPath[l.PedestrianPathIndex] = append(stoppingByPath[l.PedestrianPathIndex], l)
+				}
+			}
+			continue
+		}
+		prevIdx := (ei / 2) % n
+		nextIdx := (prevIdx + 1) % n
+		prevGreen := make(map[int]bool, len(c.Phases[prevIdx].GreenLightIDs))
+		nextGreen := make(map[int]bool, len(c.Phases[nextIdx].GreenLightIDs))
+		for _, lightID := range c.Phases[prevIdx].GreenLightIDs {
+			prevGreen[lightID] = true
+		}
+		for _, lightID := range c.Phases[nextIdx].GreenLightIDs {
+			nextGreen[lightID] = true
+		}
+		for _, l := range cycleLights {
+			if !prevGreen[l.ID] || !nextGreen[l.ID] {
+				stoppingByPath[l.PedestrianPathIndex] = append(stoppingByPath[l.PedestrianPathIndex], l)
+			}
+		}
+	}
+	return stoppingByPath
 }
 
 func spawnPedestrianAtSource(source pedestrianSpawnSource) Pedestrian {
@@ -1787,7 +2007,7 @@ func spawnPedestrianAtSource(source pedestrianSpawnSource) Pedestrian {
 	}
 }
 
-func updatePedestrians(pedestrians []Pedestrian, paths []PedestrianPath, nextID *int, existingTimers map[pedestrianSpawnKey]float32, dt float32, crossings []pedestrianCrossing, cars []Car) ([]Pedestrian, map[pedestrianSpawnKey]float32) {
+func updatePedestrians(pedestrians []Pedestrian, paths []PedestrianPath, nextID *int, existingTimers map[pedestrianSpawnKey]float32, dt float32, crossings []pedestrianCrossing, cars []Car, stoppingPedestrianLights map[int][]TrafficLight) ([]Pedestrian, map[pedestrianSpawnKey]float32) {
 	if len(paths) == 0 {
 		if existingTimers != nil {
 			clear(existingTimers)
@@ -1820,16 +2040,17 @@ func updatePedestrians(pedestrians []Pedestrian, paths []PedestrianPath, nextID 
 
 	if dt > 0 && len(active) > 0 {
 		targetSpeeds, targetOffsets := computePedestrianTargets(active, topology)
-		movementCaps := computePedestrianMovementCaps(active, topology, crossings, cars)
+		movementCaps := computePedestrianMovementCaps(active, topology, crossings, cars, stoppingPedestrianLights)
 		for i := range active {
 			ped := active[i]
-			path := topology.paths[ped.PathIndex]
+			var path pedestrianRuntimePath
 			blocked := false
-			var canonicalCap float32
-			if i < len(movementCaps) && movementCaps[i] < float32(math.MaxFloat32) {
-				canonicalCap = movementCaps[i]
-				headroom := canonicalCap - pedestrianCanonicalDistance(path, ped)
-				if headroom <= 0.05 {
+			capActive := i < len(movementCaps) && movementCaps[i] < float32(math.MaxFloat32)
+			if capActive {
+				// movementCaps[i] is expressed in ped.Distance terms (always
+				// increasing as the pedestrian walks forward, regardless of
+				// direction).
+				if movementCaps[i]-ped.Distance <= 0.05 {
 					blocked = true
 					targetSpeeds[i] = 0
 				}
@@ -1846,8 +2067,8 @@ func updatePedestrians(pedestrians []Pedestrian, paths []PedestrianPath, nextID 
 				moveSpeed = maxf(ped.Speed, ped.BaseSpeed*pedestrianMinSpeedFactor)
 			}
 			remaining := moveSpeed * dt
-			if i < len(movementCaps) && movementCaps[i] < float32(math.MaxFloat32) && !ped.TransitionActive {
-				headroom := movementCaps[i] - pedestrianCanonicalDistance(path, ped)
+			if capActive && !ped.TransitionActive {
+				headroom := movementCaps[i] - ped.Distance
 				if headroom < 0 {
 					headroom = 0
 				}
@@ -1949,12 +2170,15 @@ type SavedPedestrianPath struct {
 }
 
 type SavedTrafficLight struct {
-	ID           int     `json:"id"`
-	SplineID     int     `json:"spline_id"`
-	DistOnSpline float32 `json:"dist_on_spline"`
-	WorldPosX    float32 `json:"world_pos_x"`
-	WorldPosY    float32 `json:"world_pos_y"`
-	CycleID      int     `json:"cycle_id"`
+	ID                  int     `json:"id"`
+	SplineID            int     `json:"spline_id"`
+	DistOnSpline        float32 `json:"dist_on_spline"`
+	WorldPosX           float32 `json:"world_pos_x"`
+	WorldPosY           float32 `json:"world_pos_y"`
+	CycleID             int     `json:"cycle_id"`
+	PedestrianPathIndex int     `json:"pedestrian_path_index,omitempty"`
+	DistOnPath          float32 `json:"dist_on_path,omitempty"`
+	PedestrianForward   bool    `json:"pedestrian_forward,omitempty"`
 }
 
 type SavedTrafficPhase struct {
@@ -2087,12 +2311,15 @@ func (w *World) Save(path string) error {
 	}
 	for _, l := range w.TrafficLights {
 		saved.TrafficLights = append(saved.TrafficLights, SavedTrafficLight{
-			ID:           l.ID,
-			SplineID:     l.SplineID,
-			DistOnSpline: l.DistOnSpline,
-			WorldPosX:    l.WorldPos.X,
-			WorldPosY:    l.WorldPos.Y,
-			CycleID:      l.CycleID,
+			ID:                  l.ID,
+			SplineID:            l.SplineID,
+			DistOnSpline:        l.DistOnSpline,
+			WorldPosX:           l.WorldPos.X,
+			WorldPosY:           l.WorldPos.Y,
+			CycleID:             l.CycleID,
+			PedestrianPathIndex: l.PedestrianPathIndex,
+			DistOnPath:          l.DistOnPath,
+			PedestrianForward:   l.PedestrianForward,
 		})
 	}
 	for _, c := range w.TrafficCycles {
@@ -2244,11 +2471,14 @@ func LoadWorld(path string) (*World, error) {
 	world.TrafficLights = make([]TrafficLight, 0, len(saved.TrafficLights))
 	for _, entry := range saved.TrafficLights {
 		world.TrafficLights = append(world.TrafficLights, TrafficLight{
-			ID:           entry.ID,
-			SplineID:     entry.SplineID,
-			DistOnSpline: entry.DistOnSpline,
-			WorldPos:     NewVec2(entry.WorldPosX, entry.WorldPosY),
-			CycleID:      entry.CycleID,
+			ID:                  entry.ID,
+			SplineID:            entry.SplineID,
+			DistOnSpline:        entry.DistOnSpline,
+			WorldPos:            NewVec2(entry.WorldPosX, entry.WorldPosY),
+			CycleID:             entry.CycleID,
+			PedestrianPathIndex: entry.PedestrianPathIndex,
+			DistOnPath:          entry.DistOnPath,
+			PedestrianForward:   entry.PedestrianForward,
 		})
 		if entry.ID > maxLightID {
 			maxLightID = entry.ID
@@ -4808,6 +5038,9 @@ func buildStoppingTrafficLightsBySpline(lights []TrafficLight, cycles []TrafficC
 
 	lightsByCycle := make(map[int][]TrafficLight, len(cycles))
 	for _, l := range lights {
+		if l.IsPedestrianLight() {
+			continue
+		}
 		if l.CycleID >= 0 {
 			lightsByCycle[l.CycleID] = append(lightsByCycle[l.CycleID], l)
 		}
