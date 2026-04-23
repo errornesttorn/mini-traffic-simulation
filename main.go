@@ -11,7 +11,8 @@ import (
 	"time"
 
 	"simple-traffic-simulation/internal/filepicker"
-	simpkg "simple-traffic-simulation/sim"
+
+	simpkg "github.com/errornesttorn/mini-traffic-simulation-headless"
 
 	rl "github.com/gen2brain/raylib-go/raylib"
 )
