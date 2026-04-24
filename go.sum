@@ -1,7 +1,7 @@
 github.com/ebitengine/purego v0.7.1 h1:6/55d26lG3o9VCZX8lping+bZcmShseiqlh2bnUDiPA=
 github.com/ebitengine/purego v0.7.1/go.mod h1:ah1In8AOtksoNK6yk5z1HTJeUkC1Ez4Wk2idgGslMwQ=
-github.com/errornesttorn/mini-traffic-simulation-headless v0.0.0-20260423233409-3a671eb91bf8 h1:81S05sYTfx+uRitKP+I/6KzH2op4fy70HG3qMfCCatY=
-github.com/errornesttorn/mini-traffic-simulation-headless v0.0.0-20260423233409-3a671eb91bf8/go.mod h1:D1L9+36DP04MSy4u43XGWC2aHx8ALLB6QXRiysyxfV8=
+github.com/errornesttorn/mini-traffic-simulation-core v0.0.0-20260423235638-55d6b8f277ea h1:nl54aEj7sof828Qfk5N/y9CbT7iJqPwVDWBHJJ1l4h4=
+github.com/errornesttorn/mini-traffic-simulation-core v0.0.0-20260423235638-55d6b8f277ea/go.mod h1:f2wqx9MjHqtbgW7b2y1OdDM/FQ0mEf4NlGoQ8tM+YnA=
 github.com/gen2brain/raylib-go/raylib v0.55.1 h1:1rdc10WvvYjtj7qijHnV9T38/WuvlT6IIL+PaZ6cNA8=
 github.com/gen2brain/raylib-go/raylib v0.55.1/go.mod h1:BaY76bZk7nw1/kVOSQObPY1v1iwVE1KHAGMfvI6oK1Q=
 golang.org/x/exp v0.0.0-20240506185415-9bf2ced13842 h1:vr/HnozRka3pE4EsMEg1lgkXJkTFJCVUX+S/ZT6wYzM=

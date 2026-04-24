@@ -3,7 +3,7 @@ module simple-traffic-simulation
 go 1.22.2
 
 require (
-	github.com/errornesttorn/mini-traffic-simulation-headless v0.0.0-20260423233409-3a671eb91bf8
+	github.com/errornesttorn/mini-traffic-simulation-core v0.0.0-20260423235638-55d6b8f277ea
 	github.com/gen2brain/raylib-go/raylib v0.55.1
 )
 

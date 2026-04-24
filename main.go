@@ -12,7 +12,7 @@ import (
 
 	"simple-traffic-simulation/internal/filepicker"
 
-	simpkg "github.com/errornesttorn/mini-traffic-simulation-headless"
+	simpkg "github.com/errornesttorn/mini-traffic-simulation-core"
 
 	rl "github.com/gen2brain/raylib-go/raylib"
 )
