@@ -1,6 +1,6 @@
 # Simple traffic simulation
 
-`simple-traffic-simulation` is small Go traffic simulator with an interactive road editor. Cars are bound to splines
+`mini-traffic-simulation` is small Go traffic simulator with an interactive road editor. Cars are bound to splines
 
 ## What it does
 

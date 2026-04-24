@@ -10,51 +10,12 @@ import (
 	"strings"
 	"time"
 
-	"simple-traffic-simulation/internal/filepicker"
+	"mini-traffic-simulation/internal/filepicker"
 
 	simpkg "github.com/errornesttorn/mini-traffic-simulation-core"
 
 	rl "github.com/gen2brain/raylib-go/raylib"
 )
-
-// Run with:
-//   go mod init example.com/spline-editor
-//   go get github.com/gen2brain/raylib-go/raylib
-//   go run .
-//
-// Controls:
-//   Mouse wheel: zoom toward the cursor
-//   E: edit splines mode
-//   R: route mode
-//   B: bus line mode
-//   G: driving mode
-//   P: priority paint mode
-//   D: toggle debug overlay
-//   F3: toggle profiling overlay
-//   Ctrl+S: save splines to a chosen JSON file
-//   Ctrl+O: load splines from a chosen JSON file
-//   Tab: cycle modes
-//
-// Edit mode:
-//   Left click:  start spline / confirm P1 / set P2 / finish with P3
-//   Right click: delete hovered spline, cancel current draft, or undo P2 after it is set
-//
-// Route mode:
-//   Left click on a spline start: pick route origin
-//   Left click on a spline end:   pick route destination
-//   Right click / Escape: cancel selection or close the route panel
-//
-// Bus mode:
-//   Left click on a spline start: pick line origin
-//   Left click on a spline end:   pick line destination
-//   In the panel: add bus stops on spline intersections
-//   Right click / Escape: cancel selection or close the line panel
-//
-// Priority mode:
-//   Left click on a hovered spline: mark it as priority
-//   Right click on a hovered spline: clear priority
-//
-// Navigation intentionally has no pan. To move around, zoom out and then zoom back into a new point.
 
 type EditorMode int
 type EditorTool int

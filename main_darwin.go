@@ -8,6 +8,6 @@ import (
 )
 
 func main() {
-	fmt.Fprintln(os.Stderr, "simple-traffic-simulation does not support macOS")
+	fmt.Fprintln(os.Stderr, "mini-traffic-simulation does not support macOS")
 	os.Exit(1)
 }

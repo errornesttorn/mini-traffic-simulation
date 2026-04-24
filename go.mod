@@ -1,4 +1,4 @@
-module simple-traffic-simulation
+module mini-traffic-simulation
 
 go 1.22.2
 
