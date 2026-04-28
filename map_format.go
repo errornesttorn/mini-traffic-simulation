@@ -4,12 +4,13 @@ package main
 
 import (
 	"bufio"
-	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -29,11 +30,11 @@ type MapTile struct {
 }
 
 type ascHeader struct {
-	NCols     int
-	NRows     int
-	XLLCenter float64
-	YLLCenter float64
-	CellSize  float64
+	NCols      int
+	NRows      int
+	XLLCenter  float64
+	YLLCenter  float64
+	CellSize   float64
 	LLIsCorner bool
 }
 
@@ -86,120 +87,21 @@ func parseAscHeader(path string) (*ascHeader, error) {
 	return h, nil
 }
 
-// findSmallestIFDIndex walks a classic TIFF's IFD chain and returns the
-// zero-based index of the smallest sub-image, plus its width and height.
-func findSmallestIFDIndex(path string) (int, uint64, uint64, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return 0, 0, 0, err
+// convertTiffToPngFast uses gdal_translate to extract a downsampled PNG of the orthophoto.
+// We use gdal_translate because it's much faster than ImageMagick's convert and uses TIFF overviews automatically.
+func convertTiffToPngFast(tifPath string, outPath string) error {
+	if _, err := exec.LookPath("gdal_translate"); err != nil {
+		return errors.New("gdal_translate is required to downsample the GeoTIFF orthophoto")
 	}
-	if len(data) < 8 {
-		return 0, 0, 0, fmt.Errorf("tiff too small")
-	}
-	var order binary.ByteOrder
-	switch string(data[0:2]) {
-	case "II":
-		order = binary.LittleEndian
-	case "MM":
-		order = binary.BigEndian
-	default:
-		return 0, 0, 0, fmt.Errorf("not a tiff file")
-	}
-	if order.Uint16(data[2:4]) != 42 {
-		return 0, 0, 0, fmt.Errorf("unsupported tiff (BigTIFF not supported)")
-	}
-	off := order.Uint32(data[4:8])
-	bestIdx := -1
-	var bestW, bestH uint64
-	idx := 0
-	visited := map[uint32]bool{}
-	for off != 0 && !visited[off] {
-		visited[off] = true
-		if int(off)+2 > len(data) {
-			break
-		}
-		count := order.Uint16(data[off:])
-		entriesStart := int(off) + 2
-		if entriesStart+int(count)*12+4 > len(data) {
-			break
-		}
-		var w, h uint64
-		for i := 0; i < int(count); i++ {
-			e := entriesStart + i*12
-			tag := order.Uint16(data[e:])
-			typ := order.Uint16(data[e+2:])
-			val := data[e+8 : e+12]
-			readNum := func() uint64 {
-				switch typ {
-				case 1:
-					return uint64(val[0])
-				case 3:
-					return uint64(order.Uint16(val))
-				case 4:
-					return uint64(order.Uint32(val))
-				}
-				return 0
-			}
-			if tag == 256 {
-				w = readNum()
-			} else if tag == 257 {
-				h = readNum()
-			}
-		}
-		if w > 0 && h > 0 {
-			// Prefer the smallest IFD whose longer side is at least minLong
-			// pixels, so we pick a usable-resolution overview rather than a
-			// tiny thumbnail, while avoiding the full-resolution image that
-			// can easily exceed GPU texture limits.
-			const minLong uint64 = 2048
-			longW := w
-			if h > longW {
-				longW = h
-			}
-			longBest := bestW
-			if bestH > longBest {
-				longBest = bestH
-			}
-			candidate := longW >= minLong
-			bestOk := longBest >= minLong
-			if bestIdx == -1 {
-				bestIdx = idx
-				bestW, bestH = w, h
-			} else if candidate && !bestOk {
-				bestIdx = idx
-				bestW, bestH = w, h
-			} else if candidate && bestOk && w*h < bestW*bestH {
-				bestIdx = idx
-				bestW, bestH = w, h
-			} else if !candidate && !bestOk && w*h > bestW*bestH {
-				bestIdx = idx
-				bestW, bestH = w, h
-			}
-		}
-		off = order.Uint32(data[entriesStart+int(count)*12:])
-		idx++
-	}
-	if bestIdx == -1 {
-		return 0, 0, 0, fmt.Errorf("no IFDs found")
-	}
-	return bestIdx, bestW, bestH, nil
-}
-
-// convertTiffSubimageToPng uses ImageMagick's `convert` to extract the sub-image
-// at `index` from a classic TIFF into `outPath` as PNG. We shell out because
-// Go's x/image/tiff does not support YCbCr+JPEG compressed tiles commonly used
-// in aerial orthophoto TIFFs.
-func convertTiffSubimageToPng(tifPath string, index int, outPath string) error {
-	src := fmt.Sprintf("%s[%d]", tifPath, index)
-	cmd := exec.Command("convert", src, outPath)
+	cmd := exec.Command("gdal_translate", "-q", "-outsize", "2048", "0", "-of", "PNG", tifPath, outPath)
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
 
 type mapJson struct {
-	Version      int                    `json:"version"`
-	Name         string                 `json:"name"`
-	Simulation   string                 `json:"simulation,omitempty"`
+	Version      int    `json:"version"`
+	Name         string `json:"name"`
+	Simulation   string `json:"simulation,omitempty"`
 	RaylibCenter struct {
 		X float64 `json:"x"`
 		Y float64 `json:"y"`
@@ -208,6 +110,7 @@ type mapJson struct {
 		Dem   string `json:"dem"`
 		Ortho string `json:"ortho"`
 	} `json:"tiles"`
+	Orthos []string `json:"orthos,omitempty"`
 }
 
 // loadMapFormat reads a map.json and its referenced tiles. Returns the loaded
@@ -236,15 +139,10 @@ func loadMapFormat(mapJsonPath string) (tiles []MapTile, centerX, centerY float6
 			err = fmt.Errorf("parse %s: %w", t.Dem, aerr)
 			return
 		}
-		idx, _, _, ferr := findSmallestIFDIndex(tifPath)
-		if ferr != nil {
-			err = fmt.Errorf("inspect %s: %w", t.Ortho, ferr)
-			return
-		}
-		cachePath := filepath.Join(dir, ".cache_"+strings.TrimSuffix(t.Ortho, filepath.Ext(t.Ortho))+".png")
+		cachePath := filepath.Join(dir, ".cache_"+strings.TrimSuffix(filepath.Base(t.Ortho), filepath.Ext(t.Ortho))+".png")
 		if _, statErr := os.Stat(cachePath); statErr != nil {
-			if cerr := convertTiffSubimageToPng(tifPath, idx, cachePath); cerr != nil {
-				err = fmt.Errorf("convert %s: %w (is ImageMagick's `convert` installed?)", t.Ortho, cerr)
+			if cerr := convertTiffToPngFast(tifPath, cachePath); cerr != nil {
+				err = fmt.Errorf("convert %s: %w", t.Ortho, cerr)
 				return
 			}
 		}
@@ -277,6 +175,50 @@ func loadMapFormat(mapJsonPath string) (tiles []MapTile, centerX, centerY float6
 			HeightM:   float32(heightM),
 		})
 	}
+
+	if len(m.Orthos) > 0 {
+		orthoPaths, rerr := resolveMapFilePatterns(dir, m.Orthos)
+		if rerr != nil {
+			err = fmt.Errorf("resolve ortho files: %w", rerr)
+			return
+		}
+
+		for _, orthoPath := range orthoPaths {
+			west, east, south, north, berr := readOrthoBounds(orthoPath)
+			if berr != nil {
+				err = fmt.Errorf("read bounds for %s: %w", orthoPath, berr)
+				return
+			}
+
+			cachePath := filepath.Join(dir, ".cache_"+strings.TrimSuffix(filepath.Base(orthoPath), filepath.Ext(orthoPath))+".png")
+			if _, statErr := os.Stat(cachePath); statErr != nil {
+				if cerr := convertTiffToPngFast(orthoPath, cachePath); cerr != nil {
+					err = fmt.Errorf("convert %s: %w", orthoPath, cerr)
+					return
+				}
+			}
+			tex := rl.LoadTexture(cachePath)
+			if tex.ID == 0 {
+				err = fmt.Errorf("failed to load cached texture %s", cachePath)
+				return
+			}
+
+			leftR := float32(west - centerX)
+			topR := float32(-(north - centerY))
+			widthM := float32(east - west)
+			heightM := float32(north - south)
+
+			tiles = append(tiles, MapTile{
+				OrthoPath: orthoPath,
+				Texture:   tex,
+				LeftX:     leftR,
+				TopY:      topR,
+				WidthM:    widthM,
+				HeightM:   heightM,
+			})
+		}
+	}
+
 	return
 }
 
@@ -308,4 +250,78 @@ func drawMapTiles(tiles []MapTile) {
 		dstRec := rl.NewRectangle(t.LeftX, t.TopY, t.WidthM, t.HeightM)
 		rl.DrawTexturePro(t.Texture, srcRec, dstRec, rl.NewVector2(0, 0), 0, rl.White)
 	}
+}
+
+func resolveMapFilePatterns(baseDir string, entries []string) ([]string, error) {
+	var paths []string
+	seen := map[string]bool{}
+
+	for _, entry := range entries {
+		if strings.TrimSpace(entry) == "" {
+			continue
+		}
+
+		pattern := entry
+		if !filepath.IsAbs(pattern) {
+			pattern = filepath.Join(baseDir, pattern)
+		}
+		pattern = filepath.Clean(pattern)
+
+		var matches []string
+		if hasGlobMeta(pattern) {
+			var err error
+			matches, err = filepath.Glob(pattern)
+			if err != nil {
+				return nil, fmt.Errorf("%s: %w", entry, err)
+			}
+			if len(matches) == 0 {
+				return nil, fmt.Errorf("%s: no matches", entry)
+			}
+		} else {
+			matches = []string{pattern}
+		}
+
+		sort.Strings(matches)
+		for _, match := range matches {
+			match = filepath.Clean(match)
+			if seen[match] {
+				continue
+			}
+			seen[match] = true
+			paths = append(paths, match)
+		}
+	}
+
+	return paths, nil
+}
+
+func hasGlobMeta(path string) bool {
+	return strings.ContainsAny(path, "*?[")
+}
+
+func readOrthoBounds(path string) (west, east, south, north float64, err error) {
+	if _, lookErr := exec.LookPath("gdalinfo"); lookErr != nil {
+		return 0, 0, 0, 0, errors.New("gdalinfo is required to read orthophoto bounds")
+	}
+	out, runErr := exec.Command("gdalinfo", "-json", path).Output()
+	if runErr != nil {
+		return 0, 0, 0, 0, fmt.Errorf("gdalinfo failed: %w", runErr)
+	}
+	var info struct {
+		CornerCoordinates struct {
+			UpperLeft  [2]float64 `json:"upperLeft"`
+			LowerRight [2]float64 `json:"lowerRight"`
+		} `json:"cornerCoordinates"`
+	}
+	if err := json.Unmarshal(out, &info); err != nil {
+		return 0, 0, 0, 0, fmt.Errorf("parse gdalinfo output: %w", err)
+	}
+	west = info.CornerCoordinates.UpperLeft[0]
+	north = info.CornerCoordinates.UpperLeft[1]
+	east = info.CornerCoordinates.LowerRight[0]
+	south = info.CornerCoordinates.LowerRight[1]
+	if east <= west || north <= south {
+		return 0, 0, 0, 0, fmt.Errorf("invalid georeference (corners %.3f,%.3f .. %.3f,%.3f)", west, north, east, south)
+	}
+	return west, east, south, north, nil
 }
