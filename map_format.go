@@ -93,7 +93,7 @@ func convertTiffToPngFast(tifPath string, outPath string) error {
 	if _, err := exec.LookPath("gdal_translate"); err != nil {
 		return errors.New("gdal_translate is required to downsample the GeoTIFF orthophoto")
 	}
-	cmd := exec.Command("gdal_translate", "-q", "-outsize", "2048", "0", "-of", "PNG", tifPath, outPath)
+	cmd := exec.Command("gdal_translate", "-q", "-outsize", "4096", "0", "-of", "PNG", tifPath, outPath)
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
