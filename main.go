@@ -477,6 +477,7 @@ type CollisionPrediction = simpkg.CollisionPrediction
 type BrakingProfile = simpkg.BrakingProfile
 type FollowingProfile = simpkg.FollowingProfile
 type UpdateCarsProfile = simpkg.UpdateCarsProfile
+type PedestrianProfile = simpkg.PedestrianProfile
 
 type RoadGraph = simpkg.RoadGraph
 
@@ -490,6 +491,7 @@ type frameProfile struct {
 	brakingMS        float64
 	followMS         float64
 	updateCarsMS     float64
+	pedestrianMS     float64
 	drawMS           float64
 	basePathHits     int
 	basePathMisses   int
@@ -498,6 +500,7 @@ type frameProfile struct {
 	brakingDetail    BrakingProfile
 	followDetail     FollowingProfile
 	updateCarsDetail UpdateCarsProfile
+	pedestrianDetail PedestrianProfile
 }
 
 type profiler struct {
@@ -571,6 +574,21 @@ func (p *profiler) endFrame(sample frameProfile) {
 	p.smooth.updateCarsDetail.FastPathCars = sample.updateCarsDetail.FastPathCars
 	p.smooth.updateCarsDetail.TransitionCars = sample.updateCarsDetail.TransitionCars
 	p.smooth.updateCarsDetail.RemovedCars = sample.updateCarsDetail.RemovedCars
+	p.smooth.pedestrianMS = blendMetric(p.smooth.pedestrianMS, sample.pedestrianMS, alpha)
+	p.smooth.pedestrianDetail.CrossingsMS = blendMetric(p.smooth.pedestrianDetail.CrossingsMS, sample.pedestrianDetail.CrossingsMS, alpha)
+	p.smooth.pedestrianDetail.StoppingLightsMS = blendMetric(p.smooth.pedestrianDetail.StoppingLightsMS, sample.pedestrianDetail.StoppingLightsMS, alpha)
+	p.smooth.pedestrianDetail.BlockedSplinesMS = blendMetric(p.smooth.pedestrianDetail.BlockedSplinesMS, sample.pedestrianDetail.BlockedSplinesMS, alpha)
+	p.smooth.pedestrianDetail.UpdateMS = blendMetric(p.smooth.pedestrianDetail.UpdateMS, sample.pedestrianDetail.UpdateMS, alpha)
+	p.smooth.pedestrianDetail.TopologyMS = blendMetric(p.smooth.pedestrianDetail.TopologyMS, sample.pedestrianDetail.TopologyMS, alpha)
+	p.smooth.pedestrianDetail.TargetsMS = blendMetric(p.smooth.pedestrianDetail.TargetsMS, sample.pedestrianDetail.TargetsMS, alpha)
+	p.smooth.pedestrianDetail.MovementCapsMS = blendMetric(p.smooth.pedestrianDetail.MovementCapsMS, sample.pedestrianDetail.MovementCapsMS, alpha)
+	p.smooth.pedestrianDetail.IntegrateMS = blendMetric(p.smooth.pedestrianDetail.IntegrateMS, sample.pedestrianDetail.IntegrateMS, alpha)
+	p.smooth.pedestrianDetail.SpawnMS = blendMetric(p.smooth.pedestrianDetail.SpawnMS, sample.pedestrianDetail.SpawnMS, alpha)
+	p.smooth.pedestrianDetail.Pedestrians = sample.pedestrianDetail.Pedestrians
+	p.smooth.pedestrianDetail.Paths = sample.pedestrianDetail.Paths
+	p.smooth.pedestrianDetail.Crossings = sample.pedestrianDetail.Crossings
+	p.smooth.pedestrianDetail.Spawned = sample.pedestrianDetail.Spawned
+	p.smooth.pedestrianDetail.Removed = sample.pedestrianDetail.Removed
 }
 
 func blendMetric(prev, current, alpha float64) float64 {
@@ -1296,9 +1314,11 @@ func main() {
 		frameProf.brakingMS = world.BrakingMS
 		frameProf.followMS = world.FollowMS
 		frameProf.updateCarsMS = world.UpdateCarsMS
+		frameProf.pedestrianMS = world.PedestrianMS
 		frameProf.brakingDetail = world.BrakingProfile
 		frameProf.followDetail = world.FollowingProfile
 		frameProf.updateCarsDetail = world.UpdateCarsProfile
+		frameProf.pedestrianDetail = world.PedestrianProfile
 
 		if debugMode && rl.IsMouseButtonPressed(rl.MouseButtonMiddle) && !mouseOnToolbar {
 			clicked := findClickedCar(cars, allSplines, simpkg.BuildSplineIndexByID(allSplines), mouseWorld)
@@ -6053,6 +6073,17 @@ func drawProfilerOverlay(prof profiler) {
 		fmt.Sprintf("UpdFast    %6.2f ms   avg %6.2f", cur.updateCarsDetail.FastPathMS, avg.updateCarsDetail.FastPathMS),
 		fmt.Sprintf("UpdTrans   %6.2f ms   avg %6.2f", cur.updateCarsDetail.TransitionMS, avg.updateCarsDetail.TransitionMS),
 		fmt.Sprintf("UpdMix     dwell %d  fast %d  trans %d  rm %d", cur.updateCarsDetail.DwellCars, cur.updateCarsDetail.FastPathCars, cur.updateCarsDetail.TransitionCars, cur.updateCarsDetail.RemovedCars),
+		fmt.Sprintf("Pedestr    %6.2f ms   avg %6.2f", cur.pedestrianMS, avg.pedestrianMS),
+		fmt.Sprintf("PedCross   %6.2f ms   avg %6.2f", cur.pedestrianDetail.CrossingsMS, avg.pedestrianDetail.CrossingsMS),
+		fmt.Sprintf("PedStLi    %6.2f ms   avg %6.2f", cur.pedestrianDetail.StoppingLightsMS, avg.pedestrianDetail.StoppingLightsMS),
+		fmt.Sprintf("PedBlock   %6.2f ms   avg %6.2f", cur.pedestrianDetail.BlockedSplinesMS, avg.pedestrianDetail.BlockedSplinesMS),
+		fmt.Sprintf("PedUpd     %6.2f ms   avg %6.2f", cur.pedestrianDetail.UpdateMS, avg.pedestrianDetail.UpdateMS),
+		fmt.Sprintf("PedTopo    %6.2f ms   avg %6.2f", cur.pedestrianDetail.TopologyMS, avg.pedestrianDetail.TopologyMS),
+		fmt.Sprintf("PedTarg    %6.2f ms   avg %6.2f", cur.pedestrianDetail.TargetsMS, avg.pedestrianDetail.TargetsMS),
+		fmt.Sprintf("PedCaps    %6.2f ms   avg %6.2f", cur.pedestrianDetail.MovementCapsMS, avg.pedestrianDetail.MovementCapsMS),
+		fmt.Sprintf("PedIntg    %6.2f ms   avg %6.2f", cur.pedestrianDetail.IntegrateMS, avg.pedestrianDetail.IntegrateMS),
+		fmt.Sprintf("PedSpawn   %6.2f ms   avg %6.2f", cur.pedestrianDetail.SpawnMS, avg.pedestrianDetail.SpawnMS),
+		fmt.Sprintf("PedMix     peds %d  paths %d  cross %d  +%d/-%d", cur.pedestrianDetail.Pedestrians, cur.pedestrianDetail.Paths, cur.pedestrianDetail.Crossings, cur.pedestrianDetail.Spawned, cur.pedestrianDetail.Removed),
 		fmt.Sprintf("Draw       %6.2f ms   avg %6.2f", cur.drawMS, avg.drawMS),
 		fmt.Sprintf("Cars       %4d", cur.brakingDetail.Cars),
 		fmt.Sprintf("BrkMarshal %6.2f ms   avg %6.2f", cur.brakingDetail.MarshalMS, avg.brakingDetail.MarshalMS),
