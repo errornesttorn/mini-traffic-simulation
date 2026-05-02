@@ -195,6 +195,42 @@ func fromRLColor(c rl.Color) Color {
 	return Color(c)
 }
 
+func lerpColorChannel(a, b uint8, t float32) uint8 {
+	return uint8(math.Round(float64(float32(a) + (float32(b)-float32(a))*t)))
+}
+
+func mixColor(a, b Color, t float32) Color {
+	return NewColor(
+		lerpColorChannel(a.R, b.R, t),
+		lerpColorChannel(a.G, b.G, t),
+		lerpColorChannel(a.B, b.B, t),
+		lerpColorChannel(a.A, b.A, t),
+	)
+}
+
+func sceneColor(c Color) Color {
+	if !presentationMode {
+		return c
+	}
+	muted := mixColor(c, NewColor(188, 193, 203, c.A), 0.58)
+	muted.A = uint8(math.Round(float64(clampf(float32(c.A)*0.6, 18, 255))))
+	return muted
+}
+
+func sceneThickness(v float32) float32 {
+	if !presentationMode {
+		return v
+	}
+	return v * 0.72
+}
+
+func sceneRadius(v float32) float32 {
+	if !presentationMode {
+		return v
+	}
+	return v * 0.78
+}
+
 func drawCircleV(center Vec2, radius float32, color Color) {
 	rl.DrawCircleV(toRLVec2(center), radius, color)
 }
@@ -619,14 +655,16 @@ type TrafficCycle = simpkg.TrafficCycle
 
 // uiFont is the Ubuntu font used for all on-screen text.
 var uiFont rl.Font
+var presentationMode bool
 
 type modeToolbarItem struct {
-	key      string
-	label    string
-	mode     EditorMode
-	isDbg    bool
-	isHitbox bool
-	isInfo   bool
+	key       string
+	label     string
+	mode      EditorMode
+	isDbg     bool
+	isHitbox  bool
+	isInfo    bool
+	isPresent bool
 }
 
 type toolToolbarItem struct {
@@ -636,16 +674,17 @@ type toolToolbarItem struct {
 }
 
 var modeToolbarItems = []modeToolbarItem{
-	{"Dw", "Draw", ModeDraw, false, false, false},
-	{"Ru", "Rules", ModeRules, false, false, false},
-	{"Rt", "Route", ModeRoute, false, false, false},
-	{"Tr", "Traffic", ModeTraffic, false, false, false},
-	{"Pd", "Ped", ModePedestrian, false, false, false},
-	{"G", "Drive", ModeDriving, false, false, false},
-	{"Im", "Image", ModeImage, false, false, false},
-	{"I", "Info", 0, false, false, true},
-	{"D", "Debug", 0, true, false, false},
-	{"H", "Hitbox", 0, false, true, false},
+	{"Dw", "Draw", ModeDraw, false, false, false, false},
+	{"Ru", "Rules", ModeRules, false, false, false, false},
+	{"Rt", "Route", ModeRoute, false, false, false, false},
+	{"Tr", "Traffic", ModeTraffic, false, false, false, false},
+	{"Pd", "Ped", ModePedestrian, false, false, false, false},
+	{"G", "Drive", ModeDriving, false, false, false, false},
+	{"Im", "Image", ModeImage, false, false, false, false},
+	{"I", "Info", 0, false, false, true, false},
+	{"D", "Debug", 0, true, false, false, false},
+	{"H", "Hitbox", 0, false, true, false, false},
+	{"Y", "Present", 0, false, false, false, true},
 }
 
 var drawToolItems = []toolToolbarItem{
@@ -1006,6 +1045,9 @@ func main() {
 		if rl.IsKeyPressed(rl.KeyH) {
 			hitboxDebugMode = !hitboxDebugMode
 		}
+		if rl.IsKeyPressed(rl.KeyY) {
+			presentationMode = !presentationMode
+		}
 		if rl.IsKeyPressed(rl.KeyF3) {
 			profileMode = !profileMode
 		}
@@ -1253,6 +1295,8 @@ func main() {
 						infoMode = !infoMode
 					} else if item.isHitbox {
 						hitboxDebugMode = !hitboxDebugMode
+					} else if item.isPresent {
+						presentationMode = !presentationMode
 					} else {
 						setMode(item.mode)
 					}
@@ -1962,9 +2006,9 @@ func main() {
 				continue
 			}
 			color := splineDrawColor(spline)
-			thickness := baseThickness
+			thickness := sceneThickness(baseThickness)
 			if spline.Priority {
-				thickness = maxf(thickness, pixelsToWorld(camera.Zoom, 4))
+				thickness = maxf(thickness, sceneThickness(pixelsToWorld(camera.Zoom, 4)))
 			}
 			if i == hoveredSpline {
 				if ((tool == ToolSpline || tool == ToolQuadratic || tool == ToolLine) && stage == StageIdle) || tool == ToolPriority || tool == ToolMove {
@@ -1974,8 +2018,8 @@ func main() {
 			}
 
 			drawSpline(spline, thickness, color)
-			drawEndpoint(spline.P0, handleRadius*0.8, NewColor(60, 160, 90, 255))
-			drawEndpoint(spline.P3, handleRadius, NewColor(50, 115, 225, 255))
+			drawEndpoint(spline.P0, sceneRadius(handleRadius*0.8), sceneColor(NewColor(60, 160, 90, 255)))
+			drawEndpoint(spline.P3, sceneRadius(handleRadius), sceneColor(NewColor(50, 115, 225, 255)))
 		}
 		drawDirectionWarnings(directionWarnings, camera.Zoom, viewRect)
 		if tool == ToolReverse {
@@ -3962,7 +4006,7 @@ func trafficToggleLightInPhase(cycles []TrafficCycle, cycleID, phaseIdx, lightID
 }
 
 func drawTrafficLights(lights []TrafficLight, pending []TrafficLight, cycles []TrafficCycle, editingCycleID int, editingPhaseIdx int, showPhaseIdx int, zoom float32, viewRect worldRect) {
-	r := pixelsToWorld(zoom, 8)
+	r := sceneRadius(pixelsToWorld(zoom, 8))
 	all := append(lights, pending...)
 	for _, l := range all {
 		if !circleVisibleInWorldRect(l.WorldPos, r*1.5, viewRect) {
@@ -4013,8 +4057,8 @@ func drawTrafficLights(lights []TrafficLight, pending []TrafficLight, cycles []T
 				}
 			}
 		}
-		drawCircleV(l.WorldPos, r, NewColor(20, 20, 20, 220))
-		drawCircleV(l.WorldPos, r*0.7, fill)
+		drawCircleV(l.WorldPos, r, sceneColor(NewColor(20, 20, 20, 220)))
+		drawCircleV(l.WorldPos, r*0.7, sceneColor(fill))
 		// White ring around lights belonging to the currently-open cycle
 		if editingCycleID >= 0 && l.CycleID == editingCycleID {
 			drawRing(l.WorldPos, r*1.1, r*1.45, 0, 360, 24, NewColor(255, 255, 255, 200))
@@ -4189,7 +4233,7 @@ func drawSpeedLimitWorld(splines []Spline, hoveredSpline int, zoom float32) {
 	if hoveredSpline < 0 {
 		return
 	}
-	drawSpline(splines[hoveredSpline], pixelsToWorld(zoom, 4), NewColor(255, 200, 50, 180))
+	drawSpline(splines[hoveredSpline], sceneThickness(pixelsToWorld(zoom, 4)), sceneColor(NewColor(255, 200, 50, 180)))
 }
 
 // drawSpeedLimitLabels draws speed limit badges on any spline that has a limit,
@@ -4556,11 +4600,11 @@ func drawLaneChangeSplines(lcs []Spline, zoom float32) {
 	if len(lcs) == 0 {
 		return
 	}
-	color := NewColor(230, 60, 230, 220)
-	dimColor := NewColor(230, 60, 230, 100)
-	thickness := pixelsToWorld(zoom, 2.5)
-	handleR := pixelsToWorld(zoom, 4)
-	armThick := pixelsToWorld(zoom, 1)
+	color := sceneColor(NewColor(230, 60, 230, 220))
+	dimColor := sceneColor(NewColor(230, 60, 230, 100))
+	thickness := sceneThickness(pixelsToWorld(zoom, 2.5))
+	handleR := sceneRadius(pixelsToWorld(zoom, 4))
+	armThick := sceneThickness(pixelsToWorld(zoom, 1))
 
 	for _, s := range lcs {
 		drawSpline(s, thickness, color)
@@ -4636,12 +4680,12 @@ func drawMoveMode(splines []Spline, draft MoveDraft, hoveredSpline int, mouseWor
 // coded by direction. Highlights the hovered spline and the first-selected
 // spline in the two-click workflow.
 func drawTurnLinkMode(splines []Spline, firstSelectedID int, hoveredSpline int, zoom float32) {
-	leftColor := NewColor(60, 150, 255, 210)  // blue — left turn
-	rightColor := NewColor(255, 170, 30, 210) // amber — right turn
-	selectedColor := NewColor(255, 200, 50, 255)
-	hoveredColor := NewColor(255, 140, 30, 200)
-	thickness := pixelsToWorld(zoom, 2)
-	dotR := pixelsToWorld(zoom, 4)
+	leftColor := sceneColor(NewColor(60, 150, 255, 210))  // blue — left turn
+	rightColor := sceneColor(NewColor(255, 170, 30, 210)) // amber — right turn
+	selectedColor := sceneColor(NewColor(255, 200, 50, 255))
+	hoveredColor := sceneColor(NewColor(255, 140, 30, 200))
+	thickness := sceneThickness(pixelsToWorld(zoom, 2))
+	dotR := sceneRadius(pixelsToWorld(zoom, 4))
 
 	splineIndexByID := simpkg.BuildSplineIndexByID(splines)
 	drawArrow := func(from, to Vec2, color Color) {
@@ -4695,12 +4739,12 @@ func drawTurnLinkMode(splines []Spline, firstSelectedID int, hoveredSpline int, 
 // drawCoupleMode draws coupling relationship lines between coupled splines
 // and highlights the currently selected first spline.
 func drawCoupleMode(splines []Spline, firstSelectedID int, hoveredSpline int, zoom float32) {
-	hardColor := NewColor(80, 180, 255, 180)  // blue — hard coupling
-	softColor := NewColor(180, 120, 255, 180) // purple — soft coupling
-	selectedColor := NewColor(255, 200, 50, 255)
-	hoveredColor := NewColor(255, 140, 30, 200)
-	thickness := pixelsToWorld(zoom, 2)
-	r := pixelsToWorld(zoom, 5)
+	hardColor := sceneColor(NewColor(80, 180, 255, 180))  // blue — hard coupling
+	softColor := sceneColor(NewColor(180, 120, 255, 180)) // purple — soft coupling
+	selectedColor := sceneColor(NewColor(255, 200, 50, 255))
+	hoveredColor := sceneColor(NewColor(255, 140, 30, 200))
+	thickness := sceneThickness(pixelsToWorld(zoom, 2))
+	r := sceneRadius(pixelsToWorld(zoom, 5))
 
 	drawLinks := func(ids []int, spline Spline, color Color) {
 		midA := spline.Samples[simSamples/2]
@@ -5504,7 +5548,8 @@ func drawDebugBlameLinks(links []DebugBlameLink, cars []Car, splines []Spline, s
 }
 
 func drawRouteWithIndex(route Route, splines []Spline, indexByID map[int]int, thickness float32, zoom float32, viewRect worldRect) {
-	color := NewColor(route.Color.R, route.Color.G, route.Color.B, 90)
+	color := sceneColor(NewColor(route.Color.R, route.Color.G, route.Color.B, 90))
+	thickness = sceneThickness(thickness)
 	for _, pathID := range route.PathIDs {
 		idx, ok := indexByID[pathID]
 		if !ok {
@@ -5515,18 +5560,18 @@ func drawRouteWithIndex(route Route, splines []Spline, indexByID map[int]int, th
 		}
 		drawSpline(splines[idx], thickness, color)
 	}
-	spawnR := pixelsToWorld(zoom, 10)
-	destR := pixelsToWorld(zoom, 10)
+	spawnR := sceneRadius(pixelsToWorld(zoom, 10))
+	destR := sceneRadius(pixelsToWorld(zoom, 10))
 	if idx, ok := indexByID[route.StartSplineID]; ok && circleVisibleInWorldRect(splines[idx].P0, spawnR, viewRect) {
-		drawEndpoint(splines[idx].P0, spawnR, route.Color)
+		drawEndpoint(splines[idx].P0, spawnR, sceneColor(route.Color))
 	}
 	if idx, ok := indexByID[route.EndSplineID]; ok && circleVisibleInWorldRect(splines[idx].P3, destR, viewRect) {
 		drawEndpoint(splines[idx].P3, destR, color)
 	}
 	if route.VehicleKind == VehicleBus {
-		stopFill := NewColor(route.Color.R, route.Color.G, route.Color.B, 220)
-		stopOuter := NewColor(20, 20, 25, 220)
-		stopR := pixelsToWorld(zoom, 7)
+		stopFill := sceneColor(NewColor(route.Color.R, route.Color.G, route.Color.B, 220))
+		stopOuter := sceneColor(NewColor(20, 20, 25, 220))
+		stopR := sceneRadius(pixelsToWorld(zoom, 7))
 		for _, stop := range route.BusStops {
 			if !circleVisibleInWorldRect(stop.WorldPos, stopR, viewRect) {
 				continue
@@ -5873,7 +5918,7 @@ func toolName(tool EditorTool) string {
 
 func hudInfoLines(mode EditorMode, tool EditorTool, stage Stage, draft Draft, quadraticDraft QuadraticDraft, hoveredSpline int, routeStartSplineID, coupleModeFirstID int, debugMode bool, hitboxDebugMode bool, paused bool) []string {
 	controls := []string{
-		"Global: mouse wheel zooms to cursor, Tab cycles modes, Space pauses, Ctrl+S saves, Ctrl+O loads, F3 toggles profiler.",
+		"Global: mouse wheel zooms to cursor, Tab cycles modes, Space pauses, Ctrl+S saves, Ctrl+O loads, Y toggles presentation mode, F3 toggles profiler.",
 	}
 	switch tool {
 	case ToolSpline:
@@ -6025,10 +6070,11 @@ func drawHud(mode EditorMode, tool EditorTool, stage Stage, draft Draft, quadrat
 
 	for i, item := range modeToolbarItems {
 		r := toolbarBtnRect(i)
-		isActive := (!item.isDbg && !item.isHitbox && !item.isInfo && item.mode == mode) ||
+		isActive := (!item.isDbg && !item.isHitbox && !item.isInfo && !item.isPresent && item.mode == mode) ||
 			(item.isDbg && debugMode) ||
 			(item.isHitbox && hitboxDebugMode) ||
-			(item.isInfo && infoMode)
+			(item.isInfo && infoMode) ||
+			(item.isPresent && presentationMode)
 		isHovered := rl.CheckCollisionPointRec(mouse, r)
 
 		bg, out, fg := bgNormal, outNormal, txtDark
@@ -6074,6 +6120,9 @@ func drawHud(mode EditorMode, tool EditorTool, stage Stage, draft Draft, quadrat
 
 	// Stats — top right
 	stats := fmt.Sprintf("Splines: %d   Routes: %d   Cars: %d   Zoom: %.1f×", splineCount, routeCount, carCount, zoom)
+	if presentationMode {
+		stats += "   Present"
+	}
 	statsW := measureText(stats, 13)
 	drawText(stats, int32(rl.GetScreenWidth())-statsW-12, 14, 13, txtMuted)
 
@@ -6185,16 +6234,17 @@ func newDraft() Draft {
 }
 
 func splineDrawColor(s Spline) Color {
+	var color Color
 	if s.Priority && s.BusOnly {
-		return NewColor(95, 125, 195, 255)
+		color = NewColor(95, 125, 195, 255)
+	} else if s.Priority {
+		color = NewColor(130, 75, 215, 255)
+	} else if s.BusOnly {
+		color = NewColor(28, 145, 125, 255)
+	} else {
+		color = NewColor(35, 85, 175, 255)
 	}
-	if s.Priority {
-		return NewColor(130, 75, 215, 255)
-	}
-	if s.BusOnly {
-		return NewColor(28, 145, 125, 255)
-	}
-	return NewColor(35, 85, 175, 255)
+	return sceneColor(color)
 }
 
 func buildLinePreview(stage Stage, draft LineDraft, mouse Vec2, hoveredNode EndHit, splines []Spline) (Spline, bool) {
@@ -6677,6 +6727,9 @@ func cameraScreenWorldBounds(camera rl.Camera2D) (minX, minY, maxX, maxY float32
 }
 
 func drawGrid(camera rl.Camera2D) {
+	if presentationMode {
+		return
+	}
 	minX, minY, maxX, maxY := cameraScreenWorldBounds(camera)
 	zoom := camera.Zoom
 
@@ -6714,6 +6767,9 @@ func drawGrid(camera rl.Camera2D) {
 }
 
 func drawAxes(camera rl.Camera2D) {
+	if presentationMode {
+		return
+	}
 	minX, minY, maxX, maxY := cameraScreenWorldBounds(camera)
 
 	axis := NewColor(180, 180, 185, 255)
@@ -6807,7 +6863,7 @@ func drawSplineDirectionArrow(s Spline, zoom float32, color Color) {
 }
 
 func drawSplineDirectionArrows(splines []Spline, zoom float32, viewRect worldRect) {
-	color := NewColor(255, 120, 40, 230)
+	color := sceneColor(NewColor(255, 120, 40, 230))
 	for _, spline := range splines {
 		if !splineVisibleInWorldRect(spline, viewRect) {
 			continue
@@ -6822,12 +6878,12 @@ func drawEndpoint(p Vec2, radius float32, color Color) {
 
 func drawDirectionWarnings(warnings []DirectionWarning, zoom float32, viewRect worldRect) {
 	for _, warning := range warnings {
-		r := pixelsToWorld(zoom, 10)
+		r := sceneRadius(pixelsToWorld(zoom, 10))
 		if !circleVisibleInWorldRect(warning.Point, r*1.15, viewRect) {
 			continue
 		}
-		drawCircleV(warning.Point, r, NewColor(255, 236, 150, 235))
-		drawRing(warning.Point, r*0.75, r*1.15, 0, 360, 20, NewColor(230, 120, 20, 230))
+		drawCircleV(warning.Point, r, sceneColor(NewColor(255, 236, 150, 235)))
+		drawRing(warning.Point, r*0.75, r*1.15, 0, 360, 20, sceneColor(NewColor(230, 120, 20, 230)))
 	}
 }
 
@@ -7037,7 +7093,7 @@ func routeSpawnSliderStep(vehicleKind VehicleKind) float32 {
 	if vehicleKind == VehicleBus {
 		return 0.5
 	}
-	return 3.0
+	return 1.5
 }
 
 func sliderValueFromMouse(mouseX float32, rect rl.Rectangle, minValue, maxValue, step float32) float32 {
@@ -7371,11 +7427,13 @@ func drawPedestrianPaths(paths []simpkg.PedestrianPath, viewRect worldRect) {
 	if len(paths) == 0 {
 		return
 	}
+	thickness := sceneThickness(simpkg.PedestrianPathWidthM)
+	color := sceneColor(pedestrianPathColor)
 	for _, p := range paths {
-		if !segmentVisibleInWorldRect(p.P0, p.P1, simpkg.PedestrianPathWidthM, viewRect) {
+		if !segmentVisibleInWorldRect(p.P0, p.P1, thickness, viewRect) {
 			continue
 		}
-		drawLineEx(p.P0, p.P1, simpkg.PedestrianPathWidthM, pedestrianPathColor)
+		drawLineEx(p.P0, p.P1, thickness, color)
 	}
 }
 
